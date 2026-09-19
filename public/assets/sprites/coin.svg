@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges">
+  <g fill="#FFD23F">
+    <rect x="10" y="4" width="12" height="4"></rect>
+    <rect x="6" y="8" width="4" height="16"></rect>
+    <rect x="22" y="8" width="4" height="16"></rect>
+    <rect x="10" y="24" width="12" height="4"></rect>
+  </g>
+  <g fill="#FFFFFF">
+    <rect x="10" y="8" width="4" height="4"></rect>
+  </g>
+  <g fill="#1FAA00">
+    <rect x="14" y="8" width="4" height="12"></rect>
+  </g>
+</svg>

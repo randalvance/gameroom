@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 160" role="img" aria-label="C2I monogram">
+  
+  <rect x="4" y="4" width="172" height="152" rx="24" fill="#0A0E27"></rect>
+  <rect x="4" y="4" width="172" height="152" rx="24" fill="none" stroke="#2B5DF2" stroke-width="2" opacity="0.55"></rect>
+
+  
+  <path d="M56 54 A28 28 0 1 0 56 106" fill="none" stroke="#FFFFFF" stroke-width="14" stroke-linecap="butt"></path>
+
+  
+  <g font-family="&#39;Press Start 2P&#39;, ui-monospace, monospace" font-size="22" font-weight="bold">
+    <text x="66" y="60" fill="#7BD4FF">2</text>
+  </g>
+
+  
+  <g fill="#39FF14">
+    <rect x="98" y="48" width="48" height="14"></rect>
+    <rect x="114" y="62" width="16" height="36"></rect>
+    <rect x="98" y="98" width="48" height="14"></rect>
+  </g>
+
+  
+  <g font-family="&#39;Press Start 2P&#39;, ui-monospace, monospace" font-size="8" letter-spacing="3">
+    <text x="40" y="138" fill="#7BD4FF">CODE · TO · IMPACT</text>
+  </g>
+</svg>
