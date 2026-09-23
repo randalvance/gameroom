@@ -1,6 +1,6 @@
-import type { PlayerRole } from "~/lib/event-types"
+import type { Role } from "~/lib/auth"
 
-export type RoomRole = PlayerRole
+export type RoomRole = Role
 
 /** Role colours are deliberately bright so the ring remains legible in the diorama. */
 export function roleHaloColor(role: RoomRole | undefined): number {

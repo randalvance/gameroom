@@ -150,8 +150,8 @@ interface GameRoomProps {
   onPrimeyInteract?: () => void
   onExit?: () => void
   header?: React.ReactNode
-  /** Human multiplayer. Off by default. */
-  hub?: { baseUrl: string } | false
+  /** Human multiplayer. Off by default; configureGameRoomApi says where. */
+  hub?: boolean
   // easter eggs, unchanged
   arcadeUnlocked?: boolean
   onArcadeUnlock?: () => void | Promise<void>

@@ -1,32 +1,34 @@
 import { describe, expect, it } from "vitest"
-import type { TeamDTO } from "~/lib/event-types"
 import {
   dialogTypewriterMs,
   SNAPSHOT_INTERVAL_MS,
   unpackState,
-  unpackWander,
-  WANDER_SYNC_INTERVAL_MS,
   type HelloEvent,
   type SnapshotEntry,
-  type WanderEntry,
 } from "~/lib/gameRoomNet/protocol"
-import { wanderPos } from "~/lib/gameRoomNet/wander"
 import { objectSpeech, ROOM_OBJECTS, roomObjectIdx } from "~/lib/gameRoomNet/objects"
 import { PARTICIPANT_TABLES } from "~/components/gameRoom/constants"
 import { buildStaticColliders, movePlayer, pointBlocked } from "~/lib/gameRoomNet/collision"
-import { BULLETIN_MAX_LEN, CHAT_COOLDOWN_MS, GameRoomHub, guestSpawnPoint, introductionFor, type GuestUser } from "./hub"
+import {
+  BULLETIN_MAX_LEN,
+  CHAT_COOLDOWN_MS,
+  GameRoomHub,
+  introductionFor,
+  visitorSpawnPoint,
+  type HubVisitor,
+} from "./hub"
 
-describe("guestSpawnPoint", () => {
+describe("visitorSpawnPoint", () => {
   // The bug: the spawn band was a literal tuned for a shallower room, and once
   // the desk grid grew over it visitors arrived inside a table's collider,
   // pinned in place because every direction they could walk was blocked.
   it("never drops a visitor inside a collider, whatever their index", () => {
     const colliders = buildStaticColliders()
     for (let idx = 0; idx < 200; idx++) {
-      const spawn = guestSpawnPoint(idx, colliders)
+      const spawn = visitorSpawnPoint(idx, colliders)
       expect(
         pointBlocked(spawn.x, spawn.y, colliders),
-        `guest ${idx} spawned blocked at ${spawn.x},${spawn.y}`,
+        `visitor ${idx} spawned blocked at ${spawn.x},${spawn.y}`,
       ).toBe(false)
     }
   })
@@ -36,11 +38,11 @@ describe("guestSpawnPoint", () => {
     // every side would still strand them.
     const colliders = buildStaticColliders()
     for (let idx = 0; idx < 50; idx++) {
-      const { x, y } = guestSpawnPoint(idx, colliders)
+      const { x, y } = visitorSpawnPoint(idx, colliders)
       const canLeave = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) =>
         movePlayer(x, y, dx! * 4, dy! * 4, colliders).moved,
       )
-      expect(canLeave, `guest ${idx} is walled in at ${x},${y}`).toBe(true)
+      expect(canLeave, `visitor ${idx} is walled in at ${x},${y}`).toBe(true)
     }
   })
 
@@ -49,26 +51,10 @@ describe("guestSpawnPoint", () => {
     // next layout change could close up.
     const lastDeskBottom = Math.max(...PARTICIPANT_TABLES.map((t) => t.y + t.h))
     for (let idx = 0; idx < 50; idx++) {
-      expect(guestSpawnPoint(idx).y).toBeGreaterThan(lastDeskBottom)
+      expect(visitorSpawnPoint(idx).y).toBeGreaterThan(lastDeskBottom)
     }
   })
 })
-
-const TEAMS: TeamDTO[] = [
-  {
-    id: "team-a",
-    name: "TEAM 01",
-    players: [
-      { id: "user-ada", name: "Ada Lovelace", spriteId: null, spriteSheet: null },
-      { id: "user-bob", name: "Bob Tan", spriteId: null, spriteSheet: null },
-    ],
-  },
-  {
-    id: "team-b",
-    name: "TEAM 02",
-    players: [{ id: "user-cyn", name: "Cynthia Lee", spriteId: null, spriteSheet: null }],
-  },
-]
 
 interface Frame {
   event: string
@@ -85,120 +71,116 @@ function makeSink() {
   return { frames, send }
 }
 
-const GUESTS: Record<string, GuestUser> = {
+const VISITORS: Record<string, HubVisitor> = {
+  "user-ada": { id: "user-ada", name: "Ada Lovelace", role: "visitor", spriteId: null, spriteSheet: null },
+  "user-bob": { id: "user-bob", name: "Bob Tan", role: "visitor", spriteId: null, spriteSheet: null },
+  "user-cyn": { id: "user-cyn", name: "Cynthia Lee", role: "visitor", spriteId: null, spriteSheet: null },
   "user-admin": { id: "user-admin", name: "Randal Cunanan", role: "host", spriteId: 3, spriteSheet: null },
 }
 
-function makeHub(start = 1_000_000, opts: { teams?: TeamDTO[] } = {}) {
-  // The roster the hub reads, swappable the way a host's pages change it.
-  const roster = { teams: opts.teams ?? TEAMS }
+function makeHub(start = 1_000_000) {
   let now = start
   // A per-hub copy: tests that change a visitor's character must not leak that
   // into the next test's fixture.
-  const guests: Record<string, GuestUser> = { ...GUESTS }
-  let guestLookupFails = false
+  const visitors: Record<string, HubVisitor> = { ...VISITORS }
+  let lookupFails = false
   const hub = new GameRoomHub({
-    loadRoster: async () => roster.teams,
-    loadGuest: async (userId) => {
-      if (guestLookupFails) throw new Error("db down")
-      return guests[userId] ?? null
+    loadVisitor: async (userId) => {
+      if (lookupFails) throw new Error("db down")
+      return visitors[userId] ?? null
     },
     now: () => now,
     autoTick: false,
   })
   return {
     hub,
-    guests,
-    roster,
+    visitors,
     advance: (ms: number) => { now += ms },
-    breakGuestLookup: () => { guestLookupFails = true },
+    breakLookup: () => { lookupFails = true },
   }
 }
 
 const statesOf = (frame: Frame) =>
   (frame.data as { states: SnapshotEntry[] }).states.map(unpackState)
-const wandersOf = (frame: Frame) =>
-  (frame.data as { wanders: WanderEntry[] }).wanders.map(unpackWander)
+const helloOf = (sink: ReturnType<typeof makeSink>) => sink.frames[0]!.data as HelloEvent
 
 describe("subscribe", () => {
-  it("greets a roster member with hello: their idx, the roster, full state", async () => {
+  it("greets a visitor with hello: their idx, everyone present, where they all are", async () => {
     const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-bob", sink.send)
+    const ada = makeSink()
+    await hub.subscribe("user-ada", ada.send)
+    const bob = makeSink()
+    await hub.subscribe("user-bob", bob.send)
 
-    expect(sink.frames[0]!.event).toBe("hello")
-    const hello = sink.frames[0]!.data as HelloEvent
-    expect(hello.you).toBe(1) // flatten order: ada, bob, cyn
-    expect(hello.roster).toEqual([
-      { idx: 0, id: "user-ada", name: "Ada Lovelace", team: "TEAM 01", role: "visitor" },
-      { idx: 1, id: "user-bob", name: "Bob Tan", team: "TEAM 01", role: "visitor" },
-      { idx: 2, id: "user-cyn", name: "Cynthia Lee", team: "TEAM 02", role: "visitor" },
+    expect(bob.frames[0]!.event).toBe("hello")
+    const hello = helloOf(bob)
+    expect(hello.you).toBe(1) // connection order: ada, bob
+    expect(hello.visitors).toEqual([
+      { idx: 0, id: "user-ada", name: "Ada Lovelace", role: "visitor", spriteId: null, spriteSheet: null },
+      { idx: 1, id: "user-bob", name: "Bob Tan", role: "visitor", spriteId: null, spriteSheet: null },
     ])
-    // Only the characters being controlled are streamed — here, just Bob.
-    // The rest arrive as the wander state to run them from.
-    expect(hello.states).toHaveLength(1)
-    const you = unpackState(hello.states[0]!)
+    expect(hello.states).toHaveLength(2)
+    const you = unpackState(hello.states[1]!)
     expect(you.idx).toBe(1)
     expect(you.live).toBe(true)
-    expect(hello.wanders.map((w) => w[0])).toEqual([0, 2])
+    expect({ x: you.x, y: you.y }).toEqual(visitorSpawnPoint(1))
   })
 
-  it("a user outside the roster spectates: hello.you is null", async () => {
+  it("a user the host has not introduced spectates: hello.you is null", async () => {
     const { hub } = makeHub()
     const sink = makeSink()
-    await hub.subscribe("user-mentor", sink.send)
-    expect((sink.frames[0]!.data as HelloEvent).you).toBeNull()
+    await hub.subscribe("user-nobody", sink.send)
+    expect(helloOf(sink).you).toBeNull()
+    expect(helloOf(sink).visitors).toEqual([])
   })
 
-  // A visitor's character is the ONE the hub puts on the wire itself (a roster
-  // member's sprite is drawn from the page's own loader payload), and the
-  // HubChar behind it outlives every connection — it is only marked departed.
-  // Re-reading on connect is what stops a mentor who just changed character
+  // A visitor's character goes out on the wire from the hub, and the HubChar
+  // behind it outlives every connection — it is only marked departed.
+  // Re-reading on connect is what stops someone who just changed character
   // from walking back in as their old one until the process restarts.
   it("picks up a visitor's new character on their next connection", async () => {
-    const { hub, guests } = makeHub()
+    const { hub, visitors } = makeHub()
     const detach = await hub.subscribe("user-admin", makeSink().send)
     detach()
 
-    guests["user-admin"] = { ...guests["user-admin"]!, spriteId: 41 }
+    visitors["user-admin"] = { ...visitors["user-admin"]!, spriteId: 41 }
     const second = makeSink()
     await hub.subscribe("user-admin", second.send)
 
-    const hello = second.frames[0]!.data as HelloEvent
-    const me = hello.roster.find((entry) => entry.id === "user-admin")
+    const me = helloOf(second).visitors.find((entry) => entry.id === "user-admin")
     expect(me?.spriteId).toBe(41)
   })
 
-  // The audience draws a guest from the join frame, so a stale sprite there is
-  // the same bug seen from the other side of the room.
+  // The audience draws a visitor from the join frame, so a stale sprite there
+  // is the same bug seen from the other side of the room.
   it("announces the visitor's current character to the room", async () => {
-    const { hub, guests } = makeHub()
+    const { hub, visitors } = makeHub()
     const audience = makeSink()
     await hub.subscribe("user-ada", audience.send)
 
     const detach = await hub.subscribe("user-admin", makeSink().send)
     detach()
-    guests["user-admin"] = { ...guests["user-admin"]!, spriteId: 7 }
+    visitors["user-admin"] = { ...visitors["user-admin"]!, spriteId: 7 }
     await hub.subscribe("user-admin", makeSink().send)
 
     const joins = audience.frames.filter((f) => f.event === "join")
     expect((joins.at(-1)?.data as { spriteId?: number | null }).spriteId).toBe(7)
   })
 
-  // The refresh is a DB read on a live connection path: it must not cost the
+  // The refresh is a lookup on a live connection path: it must not cost the
   // visitor the character the hub already knows about.
   it("keeps the known character when the refresh lookup fails", async () => {
-    const { hub, breakGuestLookup } = makeHub()
+    const { hub, breakLookup } = makeHub()
     const detach = await hub.subscribe("user-admin", makeSink().send)
     detach()
 
-    breakGuestLookup()
+    breakLookup()
     const sink = makeSink()
     await hub.subscribe("user-admin", sink.send)
 
-    const hello = sink.frames[0]!.data as HelloEvent
+    const hello = helloOf(sink)
     expect(hello.you).not.toBeNull()
-    expect(hello.roster.find((entry) => entry.id === "user-admin")?.spriteId).toBe(3)
+    expect(hello.visitors.find((entry) => entry.id === "user-admin")?.spriteId).toBe(3)
   })
 
   it("broadcasts join on first connection and leave after the last detach", async () => {
@@ -207,159 +189,84 @@ describe("subscribe", () => {
     await hub.subscribe("user-ada", a.send)
     const b1 = makeSink()
     const detach1 = await hub.subscribe("user-bob", b1.send)
-    expect(a.frames.some((f) => f.event === "join" && (f.data as { idx: number }).idx === 1)).toBe(true)
+    const join = a.frames.find((f) => f.event === "join")
+    expect(join?.data).toEqual({ idx: 1, id: "user-bob", name: "Bob Tan", role: "visitor", spriteId: null, spriteSheet: null })
 
     const b2 = makeSink()
     const detach2 = await hub.subscribe("user-bob", b2.send)
     detach1()
     expect(a.frames.filter((f) => f.event === "leave")).toHaveLength(0) // still one tab open
     detach2()
-    expect(a.frames.some((f) => f.event === "leave" && (f.data as { idx: number }).idx === 1)).toBe(true)
+    expect(a.frames.find((f) => f.event === "leave")?.data).toEqual({ idx: 1 })
+  })
+
+  it("a departed visitor is gone from the room and revives at the spawn, same idx", async () => {
+    const { hub, advance } = makeHub()
+    const ada = makeSink()
+    await hub.subscribe("user-ada", ada.send)
+    const bob = makeSink()
+    const detach = await hub.subscribe("user-bob", bob.send)
+    // Bob walks off the spawn before hanging up.
+    advance(60_000)
+    hub.handleInput("user-bob", { x: 300, y: 450, dir: 1, moving: true })
+    detach()
+
+    advance(SNAPSHOT_INTERVAL_MS)
+    hub.tick()
+    const last = statesOf(ada.frames.filter((f) => f.event === "snapshot").at(-1)!)
+    expect(last.map((s) => s.idx)).toEqual([0])
+    // A fresh client never hears about the departed visitor…
+    const late = makeSink()
+    await hub.subscribe("user-cyn", late.send)
+    expect(helloOf(late).visitors.map((v) => v.id)).toEqual(["user-ada", "user-cyn"])
+
+    // …until they come back, same idx, back at the spawn.
+    const again = makeSink()
+    await hub.subscribe("user-bob", again.send)
+    expect(helloOf(again).you).toBe(1)
+    const revived = statesOf(again.frames[0]!).find((s) => s.idx === 1)!
+    expect({ x: revived.x, y: revived.y }).toEqual(visitorSpawnPoint(1))
   })
 })
 
 describe("tick", () => {
-  it("streams only the characters being controlled; wanderers travel as simulation state", async () => {
+  it("streams every connected visitor and nobody else", async () => {
     const { hub, advance } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    const hello = sink.frames[0]!.data as HelloEvent
-
-    advance(500)
-    hub.tick()
-    advance(500)
-    hub.tick()
-
-    const snapshots = sink.frames.filter((f) => f.event === "snapshot")
-    expect(snapshots).toHaveLength(2)
-    // Ada alone in every snapshot — Bob and Cyn are nobody's to stream.
-    for (const frame of snapshots) expect(statesOf(frame).map((s) => s.idx)).toEqual([0])
-
-    // The wanderers' state still advances server-side and comes down on the
-    // sync cadence: a whole second of stepping has moved Cyn along her orbit.
-    const wanders = wandersOf(sink.frames.filter((f) => f.event === "wander").at(-1)!)
-    const cynAtHello = unpackWander(hello.wanders.find((w) => w[0] === 2)!)
-    const cyn = wanders.find((w) => w.idx === 2)!
-    expect(cyn.phase).not.toBe(cynAtHello.phase)
-    // And it lands on her own table's orbit (pad is 18 px).
-    const pos = wanderPos(cyn, 1)!
-    const tbl = PARTICIPANT_TABLES[1]!
-    expect(pos.x).toBeGreaterThanOrEqual(tbl.x - 19)
-    expect(pos.x).toBeLessThanOrEqual(tbl.x + tbl.w + 19)
-  })
-
-  it("re-sends every wanderer on the sync interval and stays quiet in between", async () => {
-    const { hub, advance } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    const wanderFrames = () => sink.frames.filter((f) => f.event === "wander")
-
-    hub.tick()
-    expect(wanderFrames()).toHaveLength(1)
-    expect(wandersOf(wanderFrames()[0]!).map((w) => w.idx)).toEqual([1, 2])
-    for (let i = 0; i < 10; i++) {
-      advance(SNAPSHOT_INTERVAL_MS)
-      hub.tick()
-    }
-    expect(wanderFrames()).toHaveLength(1)
-    advance(WANDER_SYNC_INTERVAL_MS)
-    hub.tick()
-    expect(wanderFrames()).toHaveLength(2)
-  })
-
-  it("hands a disconnecting student's character to the wanderers at once", async () => {
-    const { hub, advance } = makeHub()
-    const ada = makeSink()
-    const detach = await hub.subscribe("user-ada", ada.send)
-    const bob = makeSink()
-    await hub.subscribe("user-bob", bob.send)
-    hub.tick()
-    advance(60_000)
-    hub.handleInput("user-ada", { x: 700, y: 450, dir: 1, moving: true })
-    detach()
-
-    // Bob's client gets Ada's wander state with the leave, not a tick later…
-    const wander = bob.frames.at(-2)!
-    expect(wander.event).toBe("wander")
-    const adaWander = wandersOf(wander)[0]!
-    expect(adaWander.idx).toBe(0)
-    expect(bob.frames.at(-1)!.event).toBe("leave")
-    // …and that state puts her on her own table's orbit, nearest where she
-    // hung up, exactly as the hub itself now has her.
-    const c = hub.charForUser("user-ada")!
-    expect(wanderPos(adaWander, 0)).toMatchObject({ x: c.x, y: c.y })
-    // The next snapshot no longer carries her.
-    advance(SNAPSHOT_INTERVAL_MS)
-    hub.tick()
-    const last = bob.frames.filter((f) => f.event === "snapshot").at(-1)!
-    expect(statesOf(last).map((s) => s.idx)).toEqual([1])
-  })
-
-  it("leaves a wanderer unstreamed during someone else's private introduction", async () => {
-    const { hub, advance } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    hub.tick()
-    // Walk Ada up to Bob (same table, wandering) and talk to him.
-    const bob = hub.charForUser("user-bob")!
-    advance(60_000)
-    expect(hub.handleInput("user-ada", { x: bob.x + 4, y: bob.y, dir: 3, moving: false })).toBe(true)
-    const result = hub.handleInteract("user-ada", 1)
-    expect(result.ok).toBe(true)
+    const detachBob = await hub.subscribe("user-bob", makeSink().send)
 
     advance(SNAPSHOT_INTERVAL_MS)
     hub.tick()
-    const during = statesOf(sink.frames.filter((f) => f.event === "snapshot").at(-1)!)
-    const bobFrozen = during.find((s) => s.idx === 1)
-    // Private dialogue does not take control of the target or add network traffic.
-    expect(bobFrozen).toBeUndefined()
+    expect(statesOf(sink.frames.filter((f) => f.event === "snapshot").at(-1)!).map((s) => s.idx)).toEqual([0, 1])
 
-    const wanderFramesBefore = sink.frames.filter((f) => f.event === "wander").length
-    advance((result as { ms: number }).ms + SNAPSHOT_INTERVAL_MS)
+    detachBob()
+    advance(SNAPSHOT_INTERVAL_MS)
     hub.tick()
-    // Finishing the private dialogue does not need a target handoff either.
-    const wanderFrames = sink.frames.filter((f) => f.event === "wander")
-    expect(wanderFrames.length).toBe(wanderFramesBefore)
-    const after = statesOf(sink.frames.filter((f) => f.event === "snapshot").at(-1)!)
-    expect(after.map((s) => s.idx)).toEqual([0])
+    expect(statesOf(sink.frames.filter((f) => f.event === "snapshot").at(-1)!).map((s) => s.idx)).toEqual([0])
   })
 
-  it("teleports a disconnecting character back onto its table orbit", async () => {
-    const { hub, advance } = makeHub()
-    const sink = makeSink()
-    const detach = await hub.subscribe("user-ada", sink.send)
-    // Walk Ada far from her desk (table 0), then hang up.
-    advance(60_000)
-    hub.handleInput("user-ada", { x: 700, y: 450, dir: 1, moving: true })
-    detach()
-
-    const c = hub.charForUser("user-ada")!
-    const tbl = PARTICIPANT_TABLES[0]!
-    // Back on the orbit (WALK_PAD = 18 px outside the table bounds)…
-    expect(c.x).toBeGreaterThanOrEqual(tbl.x - 19)
-    expect(c.x).toBeLessThanOrEqual(tbl.x + tbl.w + 19)
-    expect(c.y).toBeGreaterThanOrEqual(tbl.y - 19)
-    expect(c.y).toBeLessThanOrEqual(tbl.y + tbl.h + 19)
-    // …and walking it again, not frozen where the connection dropped.
-    expect(c.moving).toBe(true)
-    const before = { x: c.x, y: c.y }
-    advance(2_000)
-    hub.tick()
-    const after = hub.charForUser("user-ada")!
-    expect(after.x !== before.x || after.y !== before.y).toBe(true)
-  })
-
-  it("does not wander a live character", async () => {
+  it("moves nobody on its own: where a visitor stands is their client's to say", async () => {
     const { hub, advance } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    const before = hub.charForUser("user-ada")!
-    const { x, y } = before
+    const { x, y } = hub.charForUser("user-ada")!
     advance(2_000)
     hub.tick()
     const after = hub.charForUser("user-ada")!
     expect(after.x).toBe(x)
     expect(after.y).toBe(y)
+  })
+
+  it("stays quiet with nobody connected", async () => {
+    const { hub, advance } = makeHub()
+    const sink = makeSink()
+    const detach = await hub.subscribe("user-ada", sink.send)
+    detach()
+    const before = sink.frames.length
+    advance(SNAPSHOT_INTERVAL_MS)
+    hub.tick()
+    expect(sink.frames).toHaveLength(before)
   })
 })
 
@@ -399,9 +306,8 @@ describe("handleInput", () => {
     await hub.subscribe("user-ada", sink.send)
     const c = hub.charForUser("user-ada")!
     const tbl = PARTICIPANT_TABLES[0]!
-    // Nudge toward the table centre in tiny valid-speed steps; the wall of
-    // the collider must stop the position even though each step is small.
-    advance(60_000) // plenty of allowance — only the collider can refuse now
+    // Plenty of allowance — only the collider can refuse now.
+    advance(60_000)
     hub.handleInput("user-ada", {
       x: tbl.x + tbl.w / 2,
       y: tbl.y + tbl.h / 2,
@@ -430,10 +336,12 @@ describe("handleInteract", () => {
     const { hub, advance } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    // Park Ada right next to Bob's current wander spot.
+    await hub.subscribe("user-bob", makeSink().send)
+    // Park Ada right next to Bob's spawn.
     const bob = hub.charForUser("user-bob")!
     advance(60_000)
     hub.handleInput("user-ada", { x: bob.x + 20, y: bob.y, dir: 3, moving: false })
+    expect(hub.charForUser("user-ada")!.x).toBe(bob.x + 20)
     return { hub, advance, sink, bob }
   }
 
@@ -444,7 +352,7 @@ describe("handleInteract", () => {
     await hub.subscribe("user-cyn", bystander.send)
     await hub.subscribe("user-ada", secondTab.send)
     const result = hub.handleInteract("user-ada", bob.idx)
-    expect(result).toMatchObject({ ok: true, text: "Hi, I'm Bob! I'm on TEAM 01." })
+    expect(result).toMatchObject({ ok: true, text: "Hi, I'm Bob! I'm a visitor here." })
     const ms = (result as { ms: number }).ms
     expect(ms).toBeGreaterThanOrEqual(2_500)
     const say = sink.frames.find((f) => f.event === "say")
@@ -452,7 +360,7 @@ describe("handleInteract", () => {
       idx: bob.idx,
       by: 0,
       name: "Bob Tan",
-      text: "Hi, I'm Bob! I'm on TEAM 01.",
+      text: "Hi, I'm Bob! I'm a visitor here.",
       ms,
     })
     expect(secondTab.frames.find((f) => f.event === "say")?.data).toEqual(say?.data)
@@ -467,9 +375,8 @@ describe("handleInteract", () => {
     const cyn = makeSink()
     await hub.subscribe("user-cyn", cyn.send)
     advance(60_000)
-    // On the orbit line next to Bob — a step "south" would be inside the
-    // table's inflated collider and the hub would refuse the position.
-    hub.handleInput("user-cyn", { x: bob.x + 10, y: bob.y, dir: 3, moving: false })
+    hub.handleInput("user-cyn", { x: bob.x - 20, y: bob.y, dir: 1, moving: false })
+    expect(hub.charForUser("user-cyn")!.x).toBe(bob.x - 20)
 
     const result = hub.handleInteract("user-ada", bob.idx)
     expect(result.ok).toBe(true)
@@ -482,20 +389,17 @@ describe("handleInteract", () => {
     advance(200)
     expect(hub.handleInput("user-ada", { x: x + 5, y, dir: 1, moving: true })).toBe(true)
     expect({ x: ada.x, y: ada.y, dir: ada.dir }).toEqual({ x, y, dir: 3 })
-    // The target is not interrupted by someone else's private dialogue.
-    const bobAt = { x: bob.x, y: bob.y }
-    advance(500)
-    hub.tick()
-    expect({ x: bob.x, y: bob.y }).not.toEqual(bobAt)
+    // …the target is not frozen by someone else's private dialogue…
+    advance(100)
+    expect(hub.handleInput("user-bob", { x: bob.x + 3, y: bob.y, dir: 1, moving: true })).toBe(true)
+    expect(hub.charForUser("user-bob")!.moving).toBe(true)
+    // …and a third player can talk to the same target meanwhile.
     expect(hub.handleInteract("user-cyn", bob.idx).ok).toBe(true)
 
-    // The reader's freeze lifts on schedule; Bob continues wandering.
+    // The reader's freeze lifts on schedule.
     advance(ms)
     hub.handleInput("user-ada", { x: x + 5, y, dir: 1, moving: true })
     expect(hub.charForUser("user-ada")!.x).toBe(x + 5)
-    advance(1_000)
-    hub.tick()
-    expect(bob.x !== bobAt.x || bob.y !== bobAt.y).toBe(true)
   })
 
   it("a finished private dialog can be dismissed early, unfreezing its reader", async () => {
@@ -519,10 +423,6 @@ describe("handleInteract", () => {
     advance(100)
     hub.handleInput("user-ada", { x: x + 3, y, dir: 1, moving: true })
     expect(hub.charForUser("user-ada")!.x).toBe(x + 3)
-    const bobAt = { x: bob.x, y: bob.y }
-    advance(1_000)
-    hub.tick()
-    expect(bob.x !== bobAt.x || bob.y !== bobAt.y).toBe(true)
   })
 
   it("dismissing sends dialogEnd only to its reader", async () => {
@@ -542,18 +442,38 @@ describe("handleInteract", () => {
     expect(hub.handleDismiss("user-ada")).toBe(true)
   })
 
-  it("refuses out-of-range, self, unknown and spamming", async () => {
+  it("refuses out-of-range, self, unknown, departed and spamming", async () => {
     const { hub, advance, bob } = await liveHubWithNeighbours()
-    expect(hub.handleInteract("user-ada", 2)).toEqual({ ok: false, error: "OUT_OF_RANGE" }) // cyn, other table
+    // Cyn is connected but across the floor.
+    const detachCyn = await hub.subscribe("user-cyn", makeSink().send)
+    advance(60_000)
+    hub.handleInput("user-cyn", { x: bob.x - 120, y: bob.y, dir: 1, moving: false })
+    expect(hub.charForUser("user-cyn")!.x).toBe(bob.x - 120)
+    expect(hub.handleInteract("user-ada", 2)).toEqual({ ok: false, error: "OUT_OF_RANGE" })
     expect(hub.handleInteract("user-ada", 0)).toEqual({ ok: false, error: "NO_TARGET" }) // self
     expect(hub.handleInteract("user-ada", 99)).toEqual({ ok: false, error: "NO_TARGET" })
+    expect(hub.handleInteract("user-nobody", bob.idx)).toEqual({ ok: false, error: "NOT_LIVE" })
+    detachCyn()
     expect(hub.handleInteract("user-cyn", bob.idx)).toEqual({ ok: false, error: "NOT_LIVE" })
+    expect(hub.handleInteract("user-ada", 2)).toEqual({ ok: false, error: "NO_TARGET" }) // departed
 
     const first = hub.handleInteract("user-ada", bob.idx)
     expect(first.ok).toBe(true)
     expect(hub.handleInteract("user-ada", bob.idx)).toEqual({ ok: false, error: "BUSY" })
     advance((first as { ms: number }).ms + 100)
     expect(hub.handleInteract("user-ada", bob.idx).ok).toBe(true)
+  })
+
+  it("a visitor introduces themselves by role", async () => {
+    const { hub, advance } = makeHub()
+    await hub.subscribe("user-ada", makeSink().send)
+    await hub.subscribe("user-admin", makeSink().send)
+    // Walk Ada next to the host's spawn so the interact is in range.
+    const spawn = visitorSpawnPoint(1)
+    advance(60_000)
+    hub.handleInput("user-ada", { x: spawn.x + 15, y: spawn.y, dir: 3, moving: false })
+    const result = hub.handleInteract("user-ada", 1)
+    expect(result).toMatchObject({ ok: true, text: "Hi, I'm Randal! I'm a host here." })
   })
 })
 
@@ -592,7 +512,7 @@ describe("handleChat", () => {
     const { hub } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    // Bob is on the roster but not connected; user-nobody has no character.
+    // Bob is known to the host but not connected; user-nobody has no character.
     expect(hub.handleChat("user-bob", "hi")).toEqual({ ok: false, error: "NOT_LIVE" })
     expect(hub.handleChat("user-nobody", "hi")).toEqual({ ok: false, error: "NOT_LIVE" })
   })
@@ -622,71 +542,6 @@ describe("handleChat", () => {
     advance(200)
     expect(hub.handleInput("user-ada", { x: x + 5, y, dir: 1, moving: true })).toBe(true)
     expect(ada.x).toBe(x + 5)
-  })
-})
-
-describe("guests", () => {
-  it("gives a non-roster user a controllable guest character", async () => {
-    const { hub } = makeHub()
-    const student = makeSink()
-    await hub.subscribe("user-ada", student.send)
-
-    const admin = makeSink()
-    await hub.subscribe("user-admin", admin.send)
-    const hello = admin.frames[0]!.data as HelloEvent
-    expect(hello.you).toBe(3) // appended after the 3 roster members
-    const entry = hello.roster.find((r) => r.id === "user-admin")
-    expect(entry).toMatchObject({ guest: true, name: "Randal Cunanan", role: "host", spriteId: 3 })
-    const you = statesOf(admin.frames[0]!).find((s) => s.idx === 3)!
-    expect(you.live).toBe(true)
-    expect({ x: you.x, y: you.y }).toEqual(guestSpawnPoint(3))
-    expect(hub.handleInput("user-admin", { x: you.x + 5, y: you.y, dir: 1, moving: true })).toBe(true)
-
-    // the student's client got a join carrying everything needed to draw them
-    const join = student.frames.find((f) => f.event === "join" && (f.data as { idx: number }).idx === 3)
-    expect(join?.data).toMatchObject({ guest: true, name: "Randal Cunanan", role: "host" })
-  })
-
-  it("the guest character disappears on disconnect and revives on return", async () => {
-    const { hub, advance } = makeHub()
-    const student = makeSink()
-    await hub.subscribe("user-ada", student.send)
-    const admin = makeSink()
-    const detach = await hub.subscribe("user-admin", admin.send)
-    detach()
-
-    const leave = student.frames.find((f) => f.event === "leave")
-    expect(leave?.data).toEqual({ idx: 3, guest: true })
-    advance(500)
-    hub.tick()
-    const snapshots = student.frames.filter((f) => f.event === "snapshot")
-    const last = statesOf(snapshots[snapshots.length - 1]!)
-    expect(last.some((s) => s.idx === 3)).toBe(false)
-    // a fresh client never hears about the departed guest
-    const late = makeSink()
-    await hub.subscribe("user-cyn", late.send)
-    const hello = late.frames[0]!.data as HelloEvent
-    expect(hello.roster.some((r) => r.id === "user-admin")).toBe(false)
-
-    // …until they come back, same idx, back at the spawn
-    const again = makeSink()
-    await hub.subscribe("user-admin", again.send)
-    const revived = statesOf(again.frames[0]!).find((s) => s.idx === 3)!
-    expect({ x: revived.x, y: revived.y }).toEqual(guestSpawnPoint(3))
-  })
-
-  it("a guest introduces themselves by role", async () => {
-    const { hub, advance } = makeHub()
-    const student = makeSink()
-    await hub.subscribe("user-ada", student.send)
-    const admin = makeSink()
-    await hub.subscribe("user-admin", admin.send)
-    // Walk Ada next to the guest spawn so the interact is in range.
-    const spawn = guestSpawnPoint(3)
-    advance(60_000)
-    hub.handleInput("user-ada", { x: spawn.x + 15, y: spawn.y, dir: 3, moving: false })
-    const result = hub.handleInteract("user-ada", 3)
-    expect(result).toMatchObject({ ok: true, text: "Hi, I'm Randal! I'm a host here." })
   })
 })
 
@@ -783,27 +638,23 @@ describe("interactable objects", () => {
 })
 
 describe("introductionFor", () => {
-  it("uses the first name and the team", () => {
-    expect(introductionFor({ name: "Grace Hopper", team: "TEAM 07" })).toBe(
-      "Hi, I'm Grace! I'm on TEAM 07.",
-    )
+  it("uses the first name and the role, with the right article", () => {
+    expect(introductionFor({ name: "Grace Hopper", role: "host" })).toBe("Hi, I'm Grace! I'm a host here.")
+    expect(introductionFor({ name: "Grace Hopper", role: "observer" })).toBe("Hi, I'm Grace! I'm an observer here.")
+    expect(introductionFor({ name: "Grace" })).toBe("Hi, I'm Grace! I'm a visitor here.")
   })
 })
 
 // ---------------------------------------------------------------------------
-// The gamemaster's room controls (#GAME ROOM console tab)
+// The gamemaster's room controls (the #GAME ROOM console tab)
 // ---------------------------------------------------------------------------
-// Both of these deliberately live on the ROOM hub rather than the exchange's
-// announcement feed: that feed is the teams' bots' S1 signal, so a rehearsal
-// replay or an ad-hoc "lunch at 12:30" must not reach it, and no price impact
-// may fire off the back of one.
 
 describe("setMusic", () => {
   it("leaves the music to the room's playlist until the gamemaster takes it", async () => {
     const { hub } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    expect((sink.frames[0]!.data as HelloEvent).music).toBeNull()
+    expect(helloOf(sink).music).toBeNull()
     expect(hub.getMusic()).toBeNull()
   })
 
@@ -830,7 +681,7 @@ describe("setMusic", () => {
     hub.setMusic({ mode: "track", track: "/theme_jazz.mp3" })
     const late = makeSink()
     await hub.subscribe("user-ada", late.send)
-    expect((late.frames[0]!.data as HelloEvent).music).toEqual({ mode: "track", track: "/theme_jazz.mp3" })
+    expect(helloOf(late).music).toEqual({ mode: "track", track: "/theme_jazz.mp3" })
   })
 
   it("hands the music back to the playlist on release", async () => {
@@ -843,7 +694,7 @@ describe("setMusic", () => {
     expect(sink.frames.filter((f) => f.event === "music").at(-1)?.data).toBeNull()
     const late = makeSink()
     await hub.subscribe("user-cyn", late.send)
-    expect((late.frames[0]!.data as HelloEvent).music).toBeNull()
+    expect(helloOf(late).music).toBeNull()
   })
 })
 
@@ -928,56 +779,5 @@ describe("sendBulletin", () => {
     const late = makeSink()
     await hub.subscribe("user-ada", late.send)
     expect(late.frames.some((f) => f.event === "bulletin")).toBe(false)
-  })
-})
-
-describe("roster changes", () => {
-  const START = 1_000_000
-
-  it("seats a visitor who first arrived before the roster had them, instead of leaving them a guest", async () => {
-    const withoutDee = TEAMS
-    const withDee: TeamDTO[] = [
-      TEAMS[0]!,
-      { ...TEAMS[1]!, players: [...TEAMS[1]!.players, { id: "user-dee", name: "Dee Ng", spriteId: null, spriteSheet: null }] },
-    ]
-    const { hub, guests, roster, advance } = makeHub(START, { teams: withoutDee })
-    guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "visitor", spriteId: null, spriteSheet: null }
-    await hub.subscribe("user-ada", makeSink().send)
-
-    // Seated by the host just before Dee connects — but inside the reload
-    // window, so the hub meets Dee as a visitor.
-    roster.teams = withDee
-    advance(1_000)
-    const first = makeSink()
-    const leave = await hub.subscribe("user-dee", first.send)
-    const deeIdx = (first.frames[0]!.data as HelloEvent).you!
-    expect(hub.charForUser("user-dee")!.guest).toBe(true)
-    leave()
-
-    // Their next connection finds them at TEAM 02's desk, same character.
-    advance(5_000)
-    const second = makeSink()
-    await hub.subscribe("user-dee", second.send)
-    const dee = hub.charForUser("user-dee")!
-    expect(dee).toMatchObject({ idx: deeIdx, guest: false, teamIdx: 1, team: "TEAM 02" })
-    const hello = second.frames[0]!.data as HelloEvent
-    expect(hello.roster.find((entry) => entry.id === "user-dee")!.guest).toBeUndefined()
-  })
-
-  it("moves a reseated member to their new desk", async () => {
-    const moved: TeamDTO[] = [
-      { ...TEAMS[0]!, players: [TEAMS[0]!.players[1]!] },
-      { ...TEAMS[1]!, players: [...TEAMS[1]!.players, TEAMS[0]!.players[0]!] },
-    ]
-    const { hub, roster, advance } = makeHub(START)
-    const leave = await hub.subscribe("user-ada", makeSink().send)
-    leave()
-
-    roster.teams = moved
-    advance(30_000)
-    const ada = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-
-    expect(hub.charForUser("user-ada")).toMatchObject({ teamIdx: 1, team: "TEAM 02" })
   })
 })

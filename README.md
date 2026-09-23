@@ -111,13 +111,12 @@ Multiplayer is SSE down, POST up, with one in-memory authority
 ~250-line Bun server that serves it, plus demo answers for the feeds the room
 reads (standings, trading clock, doors).
 
-Point it at your own data by handing the hub a roster:
+Tell it who your visitors are:
 
 ```ts
-import { setGameRoomRoster, getGameRoomHub } from "@gameroom/react/hub"
+import { getGameRoomHub } from "@gameroom/react/hub"
 
-setGameRoomRoster(await loadTeams())
-const hub = getGameRoomHub({ loadGuest: (id) => lookUpVisitor(id) })
+const hub = getGameRoomHub({ loadVisitor: (id) => lookUpVisitor(id) })
 ```
 
 Routes the client speaks: `GET /api/game-room/stream`, `POST

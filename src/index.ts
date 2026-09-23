@@ -36,7 +36,8 @@ export { RoomToast } from "./components/RoomToast"
 export { AgentFinder } from "./components/AgentFinder"
 
 // ----------------------------------------------------------- multiplayer
-export { useGameRoomNet, type GameRoomNet, type GameRoomDialog, type GameRoomChatLine } from "./components/gameRoom3d/useGameRoomNet"
+export { useGameRoomNet, type GameRoomNet, type GameRoomNetOptions, type GameRoomVisitor, type GameRoomDialog, type GameRoomChatLine } from "./components/gameRoom3d/useGameRoomNet"
+export { visitorSpawnPoint } from "./lib/gameRoomNet/spawn"
 export { useSnapMic } from "./components/gameRoom3d/useSnapMic"
 
 // ------------------------------------------------------ character + sprites
@@ -99,7 +100,6 @@ export {
   type StatusStyle,
   type StatusStyleOverrides,
 } from "./lib/agents"
-export { type TeamDTO, type PlayerRole } from "./lib/event-types"
 export { type GameRoomMenuData, type GameRoomMenuPerson } from "./lib/game-room-menu"
 export { normalizeRole, KNOWN_ROLES, type Role } from "./lib/auth"
 

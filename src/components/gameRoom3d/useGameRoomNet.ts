@@ -1,22 +1,28 @@
-// Client side of the multiplayer game room. Opens the SSE stream, mints a
-// player index per connected visitor, and drives the scene handle
-// imperatively — positions never flow through React props, so the WebGL
-// scene is never rebuilt by a snapshot.
+// Client side of the visitors' hub. Opens the SSE stream, puts each connected
+// visitor's character in the scene, and drives the scene handle imperatively
+// — positions never flow through React props, so the WebGL scene is never
+// rebuilt by a snapshot.
 //
 // Degrades cleanly: while the stream is down (server restart, network) the
-// scene simply keeps its local wander, and EventSource's own reconnect brings
-// back a fresh hello that re-syncs everything. A frame that arrives cut short
-// does the same on purpose (see `on`).
+// scene simply keeps what it has, and EventSource's own reconnect brings back
+// a fresh hello that re-syncs everything. A frame that arrives cut short does
+// the same on purpose (see `on`).
+//
+// With `hub: false` there is no stream at all. The one visitor walks a
+// character the hook places itself, the plants answer from the same script
+// the hub would run, and the hatch unlocks on the same count — a
+// single-player room, not a broken one. Chat and other people need the hub.
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { track } from "~/lib/analytics"
+import type { Role } from "~/lib/auth"
 import { facingForInput } from "~/lib/gameRoomNet/collision"
-import { OBJECT_IDX_BASE } from "~/lib/gameRoomNet/objects"
+import { BACKROOMS_UNLOCK_COUNT, OBJECT_IDX_BASE, objectSpeech, roomObjectByIdx } from "~/lib/gameRoomNet/objects"
+import { visitorSpawnPoint } from "~/lib/gameRoomNet/spawn"
 import {
+  dialogDurationMs,
+  packState,
   unpackState,
-  unpackWander,
-  type WanderEntry,
-  type WanderEvent,
   type BulletinEvent,
   type ChatEvent,
   type DialogEndEvent,
@@ -25,11 +31,11 @@ import {
   type JoinEvent,
   type LeaveEvent,
   type MusicEvent,
-  type RosterEntryDTO,
   type SayEvent,
   type SnapshotEntry,
+  type VisitorDTO,
 } from "~/lib/gameRoomNet/protocol"
-import type { RoomNetState, RoomSceneHandle, RoomSelfState, RoomWanderState } from "./scene"
+import type { RoomNetState, RoomSceneHandle, RoomSelfState } from "./scene"
 import type { RoomMusic } from "~/lib/game-room-music"
 import { apiUrl } from "~/server/client"
 
@@ -57,9 +63,26 @@ export interface GameRoomChatLine {
 /** How much chat history the stream keeps scrollable. */
 const CHAT_LOG_MAX = 100
 
+/** The person at this keyboard, for a room with no hub to seat them. */
+export interface GameRoomVisitor {
+  id: string
+  name: string
+  role?: Role
+  spriteId?: number | null
+  spriteSheet?: string | null
+}
+
 export interface GameRoomGuest {
   id: string
   playerIdx: number
+}
+
+export interface GameRoomNetOptions {
+  /** Connect to the visitors' hub. Off, the room is single-player. */
+  hub?: boolean
+  /** Who is at this keyboard. Only a room with no hub reads it — with one,
+   * the hub knows from the identity the host posted. Null spectates. */
+  me?: GameRoomVisitor | null
 }
 
 export interface GameRoomNet {
@@ -76,7 +99,7 @@ export interface GameRoomNet {
   myPlayerIdx: number | null
   /** The connected visitors, each at the player index minted for them. */
   guests: GameRoomGuest[]
-  /** The stream is up and hello has landed. */
+  /** The stream is up and hello has landed. Never true without a hub. */
   connected: boolean
   /** The conversation this player is currently in, or null. */
   dialog: GameRoomDialog | null
@@ -102,30 +125,25 @@ export interface GameRoomNet {
 }
 
 interface NetSession {
-  idxToPlayerIdx: Map<number, number>
-  playerIdxToIdx: Map<number, number>
   myIdx: number | null
   myStart: { x: number; y: number } | null
   lastStates: SnapshotEntry[] | null
-  /** The wander state last handed over for each idle character (hub idx →
-   * entry), kept so a scene that mounts after the frame can still be given
-   * it. An entry is dropped the moment a snapshot streams the character. */
-  lastWanders: Map<number, WanderEntry>
-  /** Connected visitors (hub idx → roster entry); the scene adds them dynamically. */
-  guests: Map<number, RosterEntryDTO>
+  /** Connected visitors by hub idx; the scene adds them dynamically. */
+  visitors: Map<number, VisitorDTO>
 }
 
 const emptySession = (): NetSession => ({
-  idxToPlayerIdx: new Map(),
-  playerIdxToIdx: new Map(),
   myIdx: null,
   myStart: null,
   lastStates: null,
-  lastWanders: new Map(),
-  guests: new Map(),
+  visitors: new Map(),
 })
 
-export function useGameRoomNet(): GameRoomNet {
+/** The player index of the one visitor in a room with no hub. A visitor's
+ * local index is otherwise its hub index, and the hub counts from 0 too. */
+const LOCAL_PLAYER_IDX = 0
+
+export function useGameRoomNet({ hub = false, me = null }: GameRoomNetOptions = {}): GameRoomNet {
   const handleRef = useRef<RoomSceneHandle | null>(null)
   const sessionRef = useRef<NetSession>(emptySession())
 
@@ -155,25 +173,37 @@ export function useGameRoomNet(): GameRoomNet {
     setDialog(null)
   }, [])
 
-  // Guest characters this hook has told the scene about (hub idx → the local
-  // playerIdx it minted). A visitor's local index IS its hub index: unique,
-  // stable across reconnects, and clear of the room's own index ranges.
+  /** Put a conversation in the dialog box for `ms`, then take it down. */
+  const openDialog = useCallback((name: string, text: string, ms: number) => {
+    const next: GameRoomDialog = { name, text, ms, seq: ++dialogSeqRef.current }
+    dialogRef.current = next
+    setDialog(next)
+    if (dialogTimerRef.current) clearTimeout(dialogTimerRef.current)
+    dialogTimerRef.current = setTimeout(() => {
+      if (dialogRef.current?.seq === next.seq) closeDialog()
+    }, ms)
+  }, [closeDialog])
+
+  // Visitor characters this hook has told the scene about (hub idx → the
+  // local playerIdx it minted). A visitor's local index IS its hub index:
+  // unique, stable across reconnects, and clear of the room's own index
+  // ranges.
   const sceneGuestsRef = useRef(new Map<number, number>())
   const guestLocalIdx = useCallback((hubIdx: number) => hubIdx, [])
 
-  /** Reconcile the scene's guest cast with the session's connected guests,
-   * and publish who they are. */
+  /** Reconcile the scene's visitor cast with the session's connected
+   * visitors, and publish who they are. */
   const syncGuests = useCallback(() => {
     const s = sessionRef.current
-    setGuests([...s.guests].map(([hubIdx, entry]) => ({ id: entry.id, playerIdx: guestLocalIdx(hubIdx) })))
+    setGuests([...s.visitors].map(([hubIdx, entry]) => ({ id: entry.id, playerIdx: guestLocalIdx(hubIdx) })))
     const handle = handleRef.current
     if (!handle) return
     for (const [hubIdx, playerIdx] of [...sceneGuestsRef.current]) {
-      if (s.guests.has(hubIdx)) continue
+      if (s.visitors.has(hubIdx)) continue
       handle.removeGuest(playerIdx)
       sceneGuestsRef.current.delete(hubIdx)
     }
-    for (const [hubIdx, entry] of s.guests) {
+    for (const [hubIdx, entry] of s.visitors) {
       if (sceneGuestsRef.current.has(hubIdx)) continue
       const playerIdx = guestLocalIdx(hubIdx)
       const state = s.lastStates?.find((e) => e[0] === hubIdx)
@@ -198,56 +228,37 @@ export function useGameRoomNet(): GameRoomNet {
     for (const entry of s.lastStates) {
       const st = unpackState(entry)
       if (st.idx === s.myIdx) continue // own character is locally predicted
-      const playerIdx = s.idxToPlayerIdx.get(st.idx)
-      if (playerIdx === undefined) continue
+      const playerIdx = guestLocalIdx(st.idx)
+      if (!sceneGuestsRef.current.has(st.idx)) continue
       states.push({ playerIdx, x: st.x, y: st.y, dir: st.dir, moving: st.moving, live: st.live })
     }
     handle.setNetStates(states)
-  }, [])
-
-  /** Hand the scene the wander state for these idle characters, or for every
-   * one the session knows of. Own character excluded: it is never idle while
-   * this client is connected, and a stale entry must not seize control. */
-  const applyWanders = useCallback((entries?: Iterable<WanderEntry>) => {
-    const handle = handleRef.current
-    const s = sessionRef.current
-    if (!handle) return
-    const states: RoomWanderState[] = []
-    for (const entry of entries ?? s.lastWanders.values()) {
-      const w = unpackWander(entry)
-      if (w.idx === s.myIdx) continue
-      const playerIdx = s.idxToPlayerIdx.get(w.idx)
-      if (playerIdx === undefined) continue
-      states.push({ playerIdx, phase: w.phase, speed: w.speed, pauseLeft: w.pauseLeft, rng: w.rng })
-    }
-    if (states.length > 0) handle.setWanderStates(states)
-  }, [])
+  }, [guestLocalIdx])
 
   const applySession = useCallback(() => {
     const handle = handleRef.current
     const s = sessionRef.current
     if (!handle) return
     syncGuests()
-    const localPlayerIdx = s.myIdx === null ? null : s.idxToPlayerIdx.get(s.myIdx) ?? null
+    const localPlayerIdx = s.myIdx === null ? null : guestLocalIdx(s.myIdx)
     handle.setLocalPlayer(localPlayerIdx, s.myStart ?? undefined)
-    // Wanderers first, then the streamed: a character the hub has taken back
-    // since its last wander entry ends up net-driven, never the reverse.
-    applyWanders()
     applyNetStates()
-  }, [applyNetStates, applyWanders, syncGuests])
+  }, [applyNetStates, guestLocalIdx, syncGuests])
+
+  // ------------------------------------------------------------- the stream
 
   useEffect(() => {
+    if (!hub) return
     const es = new EventSource(apiUrl("/api/game-room/stream"))
 
     // Every frame is parsed here, once. The hub only ever sends JSON.stringify
     // output, so a frame that does not parse arrived cut short — Chrome on an
-    // iPhone handed a listener half a `wander` frame when the connection
-    // dropped (CODE2IMPACT2026-18), and the bare JSON.parse threw out of it.
-    // Skipping the frame is not enough: whatever it carried (a character going
-    // idle, a join, a chat line) is now missing, and nothing re-sends it. So a
-    // broken frame ends this stream and opens a fresh one, whose hello replays
-    // the room as the hub has it. Once per stream, however many bad frames the
-    // dying connection had queued.
+    // iPhone has handed a listener half a frame when the connection dropped,
+    // and a bare JSON.parse threw out of it. Skipping the frame is not enough:
+    // whatever it carried (a join, a chat line) is now missing, and nothing
+    // re-sends it. So a broken frame ends this stream and opens a fresh one,
+    // whose hello replays the room as the hub has it. Once per stream,
+    // however many bad frames the dying connection had queued.
     let resyncing = false
     const on = <T,>(name: GameRoomEventName, handler: (data: T) => void) => {
       es.addEventListener(name, (e) => {
@@ -271,18 +282,9 @@ export function useGameRoomNet(): GameRoomNet {
 
     on<HelloEvent>("hello", (hello) => {
       const s = emptySession()
-      for (const entry of hello.roster) {
-        // Only visitors are drawn here: a hub still seating a roster of its
-        // own is talking about characters this room does not have.
-        if (!entry.guest) continue
-        const playerIdx = guestLocalIdx(entry.idx)
-        s.guests.set(entry.idx, entry)
-        s.idxToPlayerIdx.set(entry.idx, playerIdx)
-        s.playerIdxToIdx.set(playerIdx, entry.idx)
-      }
+      for (const entry of hello.visitors) s.visitors.set(entry.idx, entry)
       s.myIdx = hello.you
       s.lastStates = hello.states
-      for (const entry of hello.wanders ?? []) s.lastWanders.set(entry[0], entry)
       if (hello.you !== null) {
         const mine = hello.states.find((entry) => entry[0] === hello.you)
         if (mine) {
@@ -291,7 +293,7 @@ export function useGameRoomNet(): GameRoomNet {
         }
       }
       sessionRef.current = s
-      setMyPlayerIdx(s.myIdx === null ? null : s.idxToPlayerIdx.get(s.myIdx) ?? null)
+      setMyPlayerIdx(s.myIdx === null ? null : guestLocalIdx(s.myIdx))
       syncGuests()
       setOnlineCount(countLive(hello.states))
       setBackroomsUnlocked(hello.backroomsUnlocked === true)
@@ -309,50 +311,26 @@ export function useGameRoomNet(): GameRoomNet {
     on<{ states: SnapshotEntry[] }>("snapshot", ({ states }) => {
       const s = sessionRef.current
       s.lastStates = states
-      for (const entry of states) s.lastWanders.delete(entry[0])
       setOnlineCount(countLive(states))
       applyNetStates()
-    })
-
-    // Characters that have gone idle, with the state to walk them from. The
-    // hub sends this BEFORE the snapshot that stops carrying them, so the
-    // scene never sits on a stale streamed position.
-    on<WanderEvent>("wander", ({ wanders }) => {
-      const s = sessionRef.current
-      for (const entry of wanders) s.lastWanders.set(entry[0], entry)
-      applyWanders(wanders)
     })
 
     on<SayEvent>("say", (say) => {
       const s = sessionRef.current
       const participant = s.myIdx !== null && say.by === s.myIdx
-      if (participant) {
-        // My private conversation: freeze only my input and face the target.
-        const partnerIdx = say.idx
-        let faceDir: 0 | 1 | 2 | 3 | undefined
-        const mine = s.lastStates?.find((entry) => entry[0] === s.myIdx)
-        const partner = s.lastStates?.find((entry) => entry[0] === partnerIdx)
-        if (mine && partner) {
-          const me = unpackState(mine)
-          const them = unpackState(partner)
-          faceDir = facingForInput(them.x - me.x, them.y - me.y, me.dir)
-        }
-        handleRef.current?.freezeLocalInput(say.ms, faceDir)
-        const next: GameRoomDialog = {
-          name: say.name,
-          text: say.text,
-          ms: say.ms,
-          seq: ++dialogSeqRef.current,
-        }
-        dialogRef.current = next
-        setDialog(next)
-        if (dialogTimerRef.current) clearTimeout(dialogTimerRef.current)
-        dialogTimerRef.current = setTimeout(() => {
-          if (dialogRef.current?.seq === next.seq) closeDialog()
-        }, say.ms)
-        return
+      if (!participant) return // only its reader sees a private conversation
+      // My private conversation: freeze only my input and face the target.
+      const partnerIdx = say.idx
+      let faceDir: 0 | 1 | 2 | 3 | undefined
+      const mine = s.lastStates?.find((entry) => entry[0] === s.myIdx)
+      const partner = s.lastStates?.find((entry) => entry[0] === partnerIdx)
+      if (mine && partner) {
+        const me = unpackState(mine)
+        const them = unpackState(partner)
+        faceDir = facingForInput(them.x - me.x, them.y - me.y, me.dir)
       }
-      // Ignore older servers' broadcast conversations; only their reader sees them.
+      handleRef.current?.freezeLocalInput(say.ms, faceDir)
+      openDialog(say.name, say.text, say.ms)
     })
 
     // A bulletin is a moment: nothing replays it, and the room's banner is
@@ -370,8 +348,7 @@ export function useGameRoomNet(): GameRoomNet {
       const s = sessionRef.current
       // The bubble every passer-by sees — reused from interact speech, own
       // character included (the hub echoes the sender's message back).
-      const playerIdx = s.idxToPlayerIdx.get(chat.idx)
-      if (playerIdx !== undefined) handleRef.current?.showSpeech(playerIdx, chat.text)
+      if (sceneGuestsRef.current.has(chat.idx)) handleRef.current?.showSpeech(guestLocalIdx(chat.idx), chat.text)
       const line: GameRoomChatLine = {
         seq: ++chatSeqRef.current,
         name: chat.name,
@@ -381,27 +358,14 @@ export function useGameRoomNet(): GameRoomNet {
       setChatLog((log) => [...log.slice(-(CHAT_LOG_MAX - 1)), line])
     })
 
-    // For roster members, join/leave are just live-flag flips the next
-    // snapshot repeats — nothing to do. Guests are actual cast changes.
+    // Someone arrived or left: the cast changes.
     on<JoinEvent>("join", (entry) => {
-      if (!entry.guest) return
-      const s = sessionRef.current
-      const playerIdx = guestLocalIdx(entry.idx)
-      s.guests.set(entry.idx, entry)
-      s.idxToPlayerIdx.set(entry.idx, playerIdx)
-      s.playerIdxToIdx.set(playerIdx, entry.idx)
+      sessionRef.current.visitors.set(entry.idx, entry)
       syncGuests()
     })
 
     on<LeaveEvent>("leave", (leave) => {
-      if (!leave.guest) return
-      const s = sessionRef.current
-      const playerIdx = s.idxToPlayerIdx.get(leave.idx)
-      s.guests.delete(leave.idx)
-      if (playerIdx !== undefined) {
-        s.idxToPlayerIdx.delete(leave.idx)
-        s.playerIdxToIdx.delete(playerIdx)
-      }
+      sessionRef.current.visitors.delete(leave.idx)
       syncGuests()
     })
 
@@ -420,9 +384,53 @@ export function useGameRoomNet(): GameRoomNet {
       sessionRef.current = emptySession()
       sceneGuestsRef.current.clear()
       setGuests([])
+      setConnected(false)
       closeDialog()
     }
-  }, [applyNetStates, applySession, applyWanders, closeDialog, guestLocalIdx, syncGuests, streamEpoch])
+  }, [hub, applyNetStates, applySession, closeDialog, guestLocalIdx, openDialog, syncGuests, streamEpoch])
+
+  // --------------------------------------------------------- without a hub
+
+  // The one visitor's character, seated by this hook the way the hub would
+  // have: a join at the spawn point, and a leave when they change or go.
+  const localVisitor = hub ? null : me
+  const localKey = localVisitor
+    ? [localVisitor.id, localVisitor.name, localVisitor.role ?? "visitor", localVisitor.spriteId ?? "", localVisitor.spriteSheet ?? ""].join("\u0000")
+    : null
+  const localVisitorRef = useRef(localVisitor)
+  localVisitorRef.current = localVisitor
+  /** Each plant's script progress for this visitor, kept for the visit. */
+  const localSayCountRef = useRef(new Map<string, number>())
+
+  useEffect(() => {
+    if (localKey === null) return
+    const visitor = localVisitorRef.current!
+    const s = emptySession()
+    const spawn = visitorSpawnPoint(LOCAL_PLAYER_IDX)
+    s.myIdx = LOCAL_PLAYER_IDX
+    s.myStart = spawn
+    s.visitors.set(LOCAL_PLAYER_IDX, {
+      idx: LOCAL_PLAYER_IDX,
+      id: visitor.id,
+      name: visitor.name,
+      role: visitor.role ?? "visitor",
+      spriteId: visitor.spriteId ?? null,
+      spriteSheet: visitor.spriteSheet ?? null,
+    })
+    s.lastStates = [packState({ idx: LOCAL_PLAYER_IDX, x: spawn.x, y: spawn.y, dir: 2, moving: false, live: true })]
+    sessionRef.current = s
+    setMyPlayerIdx(LOCAL_PLAYER_IDX)
+    setOnlineCount(1)
+    applySession()
+    return () => {
+      sessionRef.current = emptySession()
+      setMyPlayerIdx(null)
+      setOnlineCount(0)
+      syncGuests()
+      handleRef.current?.setLocalPlayer(null)
+      closeDialog()
+    }
+  }, [localKey, applySession, closeDialog, syncGuests])
 
   const onSceneReady = useCallback(
     (handle: RoomSceneHandle | null) => {
@@ -433,6 +441,7 @@ export function useGameRoomNet(): GameRoomNet {
   )
 
   const onSelfState = useCallback((state: RoomSelfState) => {
+    if (!hub) return
     void fetch(apiUrl("/api/game-room/input"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -440,25 +449,47 @@ export function useGameRoomNet(): GameRoomNet {
     }).catch(() => {
       /* transient — the next report retries */
     })
-  }, [])
+  }, [hub])
+
+  /** A room with no hub answers the plants itself, from the hub's script. */
+  const interactLocally = useCallback((targetIdx: number) => {
+    if (dialogRef.current) return
+    const obj = roomObjectByIdx(targetIdx)
+    if (!obj) return
+    const counts = localSayCountRef.current
+    const count = (counts.get(obj.id) ?? 0) + 1
+    counts.set(obj.id, count)
+    const text = objectSpeech(obj.id, count)
+    const ms = dialogDurationMs(text)
+    handleRef.current?.freezeLocalInput(ms)
+    openDialog(obj.name, text, ms)
+    if (obj.id === "plant-se" && count === BACKROOMS_UNLOCK_COUNT) {
+      track("easter_egg.backrooms_unlocked")
+      setBackroomsUnlocked(true)
+    }
+  }, [openDialog])
 
   const onInteract = useCallback((targetPlayerIdx: number) => {
     // Objects address themselves: their idx range is global, not per-session.
-    const targetIdx =
-      targetPlayerIdx >= OBJECT_IDX_BASE
-        ? targetPlayerIdx
-        : sessionRef.current.playerIdxToIdx.get(targetPlayerIdx)
-    if (targetIdx === undefined) return
+    const isObject = targetPlayerIdx >= OBJECT_IDX_BASE
+    if (!hub) {
+      if (isObject && sessionRef.current.myIdx !== null) interactLocally(targetPlayerIdx)
+      return
+    }
+    // A visitor's local index is its hub index, so the target needs no
+    // translation — only a check that it is someone the hub told us about.
+    if (!isObject && !sessionRef.current.visitors.has(targetPlayerIdx)) return
     void fetch(apiUrl("/api/game-room/interact"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ targetIdx }),
+      body: JSON.stringify({ targetIdx: targetPlayerIdx }),
     }).catch(() => {
       /* nothing to retry — the press just misses */
     })
-  }, [])
+  }, [hub, interactLocally])
 
   const sendChat = useCallback((text: string) => {
+    if (!hub) return // chat is between people, and people need the hub
     track("game_room.chat_sent")
     void fetch(apiUrl("/api/game-room/chat"), {
       method: "POST",
@@ -467,19 +498,20 @@ export function useGameRoomNet(): GameRoomNet {
     }).catch(() => {
       /* nothing to retry — the line just doesn't land */
     })
-  }, [])
+  }, [hub])
 
   const dismissDialog = useCallback(() => {
     if (!dialogRef.current) return
     // Optimistic: close and unfreeze immediately (the hub's dismiss gate is
     // aligned with the typewriter, so an honest press is never early), then
-    // tell the hub so the partner unfreezes too.
+    // tell the hub so it unfreezes the character too.
     closeDialog()
     handleRef.current?.freezeLocalInput(0)
+    if (!hub) return
     void fetch(apiUrl("/api/game-room/dismiss"), { method: "POST" }).catch(() => {
       /* worst case the freeze runs out on its own */
     })
-  }, [closeDialog])
+  }, [closeDialog, hub])
 
   return { onSceneReady, onSelfState, onInteract, onlineCount, myPlayerIdx, guests, connected, dialog, dismissDialog, chatLog, sendChat, bulletin, music, backroomsUnlocked }
 }

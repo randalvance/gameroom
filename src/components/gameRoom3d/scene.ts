@@ -122,18 +122,6 @@ export interface RoomNetState {
     live: boolean
 }
 
-/**
- * An idle character's wander state, handed over by the hub for this client to
- * step locally: the hub does not stream characters nobody is controlling.
- */
-export interface RoomWanderState {
-    playerIdx: number
-    phase: number
-    speed: number
-    pauseLeft: number
-    rng: number
-}
-
 /** The local player's own state, reported back up to the hub. Room-plan px. */
 export interface RoomSelfState {
     x: number
@@ -199,11 +187,8 @@ export interface RoomSceneHandle {
      * absent) — the host's answer to onAgentInteract, or anything else it
      * wants said. */
     say(agentId: string, text: string, ms?: number): void
-    /** Hub-driven positions for remote characters (the local player is skipped). */
+    /** Hub-driven positions for the other visitors (the local player is skipped). */
     setNetStates(states: readonly RoomNetState[]): void
-    /** Idle characters, with the wander state to run them from locally. Each
-     * one stops following the hub and orbits its table from this state. */
-    setWanderStates(states: readonly RoomWanderState[]): void
     /** Hand keyboard control of a character to this client (null releases it). */
     setLocalPlayer(playerIdx: number | null, start?: { x: number; y: number }): void
     /** Disable local movement and interaction without stopping the scene or
@@ -1798,9 +1783,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         /** Beyond this (world units), stop gliding and teleport — a reconnect or a
          * disconnect hand-back, not ordinary movement. */
         const NET_SNAP_DIST = 7
-        /** Farther than this from its lap when handed back to the wander, a
-         * character hops home over a beat instead of appearing there. */
-        const WANDER_HOP_DIST = 1.5
 
         const stepLocalControl = () => {
             if (!localInput.canInteract() || performance.now() < inputFrozenUntil) {
@@ -2946,7 +2928,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     dir = localDir
                     standing = !localMoving
                 } else if (c.net) {
-                    // Remote-synced (a live player elsewhere, or the hub's wander sim):
+                    // Remote-synced (another visitor, streamed by the hub):
                     // glide toward the 10 Hz target rather than stepping to it.
                     c.transition = null
                     const dx = c.net.x - c.x
@@ -3375,29 +3357,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     if (!c || c === localChar) continue
                     c.net = { x: toX(s.x), z: toZ(s.y), dir: s.dir, moving: s.moving, live: s.live }
                     c.presenceHalo.visible = s.live
-                }
-            },
-            setWanderStates(states) {
-                for (const s of states) {
-                    const c = charByPlayerIdx.get(s.playerIdx)
-                    if (!c || c === localChar || c.teamIdx === null) continue
-                    c.phase = s.phase
-                    c.speed = s.speed
-                    c.pauseLeft = s.pauseLeft
-                    c.rng = s.rng
-                    c.net = null
-                    c.presenceHalo.visible = false
-                    // A character the hub has just handed back — a player who hung up
-                    // somewhere across the room — hops home rather than blinking there.
-                    // A resync of one already on its lap is within a stride and just
-                    // takes the correction.
-                    const home = authoritativePosition(c)
-                    const dx = home.x - c.x, dz = home.z - c.z
-                    if (dx * dx + dz * dz > WANDER_HOP_DIST * WANDER_HOP_DIST) {
-                        c.transition = { fromX: c.x, fromZ: c.z, startedAt: performance.now(), duration: 520 }
-                    } else {
-                        c.transition = null
-                    }
                 }
             },
             setLocalPlayer(playerIdx, start) {

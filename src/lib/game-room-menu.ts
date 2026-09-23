@@ -1,11 +1,11 @@
 // What the pause menu shows about a person: enough to draw them and name them.
 
-import type { PlayerRole } from "./event-types"
+import type { Role } from "./auth"
 
 export interface GameRoomMenuPerson {
   id: string
   name: string
-  role: PlayerRole
+  role: Role
   spriteId: number | null
   spriteSheet: string | null
   /** The indexes the room derives a character from when no sprite is set. */

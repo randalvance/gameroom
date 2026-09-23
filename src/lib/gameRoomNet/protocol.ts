@@ -3,30 +3,20 @@
 // pixel space; the scene owns the px→world mapping.
 //
 // Characters are addressed by `idx`, a session-stable small integer the hub
-// assigns per roster member (append-only, so it never shifts mid-session).
-// The `hello` event carries the idx ↔ users.id mapping; clients translate to
-// their own playerIdx from there. Snapshots then stay compact — no repeated
-// Clerk-id strings at 10 Hz.
+// assigns per visitor (append-only, so it never shifts mid-session). The
+// `hello` event carries the idx ↔ user id mapping; clients translate to their
+// own playerIdx from there. Snapshots then stay compact — no repeated id
+// strings at 10 Hz.
+//
+// Only humans travel here. The agents are the host's, drawn by every client
+// from the same props; the hub never hears of them.
 
 import type { WalkDir } from "../../components/gameRoom/spriteIndex"
-import type { PlayerRole } from "../event-types"
+import type { Role } from "../auth"
 import type { RoomMusic } from "../game-room-music"
-import type { WanderState } from "./wander"
 
 /** How often the hub broadcasts a snapshot of the characters being controlled. */
 export const SNAPSHOT_INTERVAL_MS = 100
-
-/**
- * How often the hub re-sends every idle character's simulation state.
- *
- * Idle characters are not streamed: their orbit of the table is a deterministic
- * simulation every client runs for itself, so all a client needs is the
- * state to run it from. That goes out when a character becomes idle (a player
- * hangs up, a conversation ends) and then on this cadence, to pull back the
- * drift of clocks that tick at nominally the same rate — a throttled
- * background tab loses steps, a foreground one does not.
- */
-export const WANDER_SYNC_INTERVAL_MS = 5_000
 
 export interface NetCharState {
   idx: number
@@ -35,86 +25,62 @@ export interface NetCharState {
   y: number
   dir: WalkDir
   moving: boolean
-  /** Player-controlled right now (false = server-side wander). */
+  /** Player-controlled right now (false = frozen in a conversation). */
   live: boolean
 }
 
 /** Compact snapshot entry: [idx, x, y, dir, flags] — flags bit0 moving, bit1 live. */
 export type SnapshotEntry = [number, number, number, number, number]
 
-/**
- * An idle character's simulation state: [idx, phase, speed, pauseLeft, rng] —
- * exactly a WanderState, which the client steps from here on. Phase is the
- * distance along the table's orbit in plan px; the rest are as seeded.
- */
-export type WanderEntry = [number, number, number, number, number]
-
-export function packWander(idx: number, w: WanderState): WanderEntry {
-  return [idx, Math.round(w.phase * 100) / 100, w.speed, w.pauseLeft, w.rng]
-}
-
-export function unpackWander(e: WanderEntry): { idx: number } & WanderState {
-  return { idx: e[0], phase: e[1], speed: e[2], pauseLeft: e[3], rng: e[4] }
-}
-
-export interface RosterEntryDTO {
+/** A connected visitor, as hello and join carry them: everything a client
+ * needs to draw a character it has never seen. */
+export interface VisitorDTO {
   idx: number
-  id: string // users.id (Clerk id)
+  /** The host's id for this person. */
+  id: string
   name: string
-  team: string
-  /** A visitor (admin/mentor/judge — anyone without a seat on the map): the
-   * character exists only while they are connected. Guests are unknown to the
-   * page's own roster, so the entry carries their sprite too. */
-  guest?: boolean
-  role?: PlayerRole
-  spriteId?: number | null
-  spriteSheet?: string | null
+  role: Role
+  spriteId: number | null
+  spriteSheet: string | null
 }
 
 export interface HelloEvent {
-  /** This user's plant discovery; optional during a rollout. Never room-wide. */
+  /** This user's plant discovery. Never room-wide. */
   backroomsUnlocked?: boolean
   /** The connecting user's own idx, or null for viewers with no character. */
   you: number | null
-  roster: RosterEntryDTO[]
-  /** The characters being controlled right now — what snapshots carry. */
+  /** Everyone in the room right now, this user included. */
+  visitors: VisitorDTO[]
+  /** Where they all are — what snapshots carry. */
   states: SnapshotEntry[]
-  /** Everyone else, as the simulation state to run them from. */
-  wanders: WanderEntry[]
   /**
    * What the gamemaster has put on the PA screens' music — one looping track,
-   * silence, or null for the room's own playlist. Optional during a rollout;
-   * state like `screen`, and carried here for the same reason.
+   * silence, or null for the room's own playlist. State, and carried here so
+   * a screen that reconnects mid-hold plays what the others do.
    */
   music?: RoomMusic
 }
 
-/**
- * The characters being controlled: live players, plus anyone frozen in a
- * conversation, whose facing the hub set. An idle character is NOT here —
- * its absence means "run the wander you were last handed for it".
- */
+/** Every character in the room: the connected visitors, at the positions
+ * their own clients reported, plus anyone frozen mid-conversation. */
 export interface SnapshotEvent {
   states: SnapshotEntry[]
 }
 
-/**
- * Idle characters' simulation state: every one of them on the sync cadence,
- * or just the ones that have gone idle since the last snapshot. A client
- * adopts each state and steps it locally from there.
- */
-export interface WanderEvent {
-  wanders: WanderEntry[]
-}
+/** A visitor arrived: the full entry, since the other clients have never
+ * heard of them. */
+export type JoinEvent = VisitorDTO
 
-/** join carries the full roster entry — a guest joining mid-session is a
- * character the other clients have never heard of. */
-export type JoinEvent = RosterEntryDTO
-
+/** A visitor's last connection closed; their character leaves with them. */
 export interface LeaveEvent {
   idx: number
-  /** A departing guest's character disappears; a student's returns to its table. */
-  guest?: boolean
+}
+
+/** How long a conversation freezes its reader, from its text. Shared: a room
+ * with no hub runs the plants' dialogue itself, on the same clock. */
+export function dialogDurationMs(text: string): number {
+  const words = text.split(/\s+/).filter(Boolean).length
+  return Math.min(6_000, Math.max(2_500, 1_200 + words * 350))
 }
 
 /** Cadence of the dialog box's word-by-word reveal. Shared: the client's
@@ -263,7 +229,6 @@ export type GameRoomEventName =
   | "backrooms"
   | "hello"
   | "snapshot"
-  | "wander"
   | "join"
   | "leave"
   | "say"

@@ -87,6 +87,7 @@ export function App() {
     <AudioProvider defaultMuted={false}>
       <GameRoom
         agents={agents}
+        hub
         me={{ id: identity.id, name: identity.name || "Visitor", role: identity.role, spriteId: identity.spriteId }}
         onReady={setRoom}
         onAgentInteract={(agent) => {

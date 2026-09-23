@@ -7,7 +7,7 @@ import {
   INTERACT_PROBE_PX,
   INTERACT_RANGE_PX,
 } from "../../lib/gameRoomNet/collision"
-import { guestSpawnPoint } from "~/server/hub"
+import { visitorSpawnPoint } from "../../lib/gameRoomNet/spawn"
 import { OBJECT_IDX_BASE, ROOM_OBJECTS } from "../../lib/gameRoomNet/objects"
 import { resolveRoomInteract } from "../../lib/gameRoomNet/tables"
 import { BIG_SCREEN_IDX } from "./wall"
@@ -53,7 +53,7 @@ describe("PRIMEY_POINT", () => {
   })
 
   it("stands clear of every slot the arrivals scatter can put a visitor in", () => {
-    // Primey used to stand dead centre, which is the middle of guestSpawnPoint's
+    // Primey used to stand dead centre, which is the middle of visitorSpawnPoint's
     // own box — visitors materialised inside the billboard, and a character on
     // top of Primey WINS the interact probe (nearest candidate), so a press
     // meant for the chat panel talked to them instead.
@@ -63,7 +63,7 @@ describe("PRIMEY_POINT", () => {
     const reach = INTERACT_PROBE_PX + INTERACT_RANGE_PX
     let nearest = Infinity
     for (let idx = 0; idx < 1260; idx++) {
-      const spawn = guestSpawnPoint(idx, colliders)
+      const spawn = visitorSpawnPoint(idx, colliders)
       const d = Math.hypot(spawn.x - PRIMEY_POINT.x, spawn.y - PRIMEY_POINT.y)
       nearest = Math.min(nearest, d)
     }

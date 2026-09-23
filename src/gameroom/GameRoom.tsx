@@ -9,6 +9,8 @@
 // What it deliberately does NOT own:
 //
 //   - identity. There is no sign-in here. `me` is whoever you say it is.
+//   - a server. Other people need the hub (`hub`); the agents, the plants
+//     and the games do not.
 //   - persistence. Unlocking the arcade fires `onArcadeUnlock`; keeping that
 //     across visits is the host's business (`arcadeUnlocked` hands it back).
 //   - what agents ARE. They arrive as a list with statuses; what one says
@@ -107,6 +109,12 @@ export interface GameRoomProps {
   onExit?: () => void
   /** Rendered above the room — your own header, ticker or nothing at all. */
   header?: React.ReactNode
+  /**
+   * Connect to the visitors' hub (`server/hub-server.ts`, or your own
+   * service speaking the same routes; `configureGameRoomApi` says where).
+   * Off by default: the room is single-player, and needs no server at all.
+   */
+  hub?: boolean
 }
 
 const SPECTATOR: Visitor = { id: "spectator", name: "Spectator", role: "visitor" }
@@ -138,6 +146,7 @@ export function GameRoom({
   onDuelWin,
   onExit,
   header,
+  hub = false,
 }: GameRoomProps) {
   const { playSfx, suspendMusic, effectsVolume, musicMuted, musicVolume } = useSiteAudio()
   const visitor = me ?? SPECTATOR
@@ -179,7 +188,7 @@ export function GameRoom({
   const sceneRef = useRef<RoomSceneHandle | null>(null)
   const onReadyRef = useRef(onReady)
   onReadyRef.current = onReady
-  const net = useGameRoomNet()
+  const net = useGameRoomNet({ hub, me: me ?? null })
   // The room's alternating playlist — unless the gamemaster has put one track
   // on, or stopped the music, and this is a PA screen (a host or a screen).
   usePageMusic(roomMusicRequest(net.music, visitor.role ?? "visitor"))

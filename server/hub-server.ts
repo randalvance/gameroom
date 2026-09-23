@@ -2,9 +2,10 @@
 //
 // Two jobs:
 //
-//   1. MULTIPLAYER. The hub (src/server/hub.ts) is the authority for what
-//      every character in the room is doing; this serves it over SSE down and
-//      POST up, which is the transport the client half already speaks.
+//   1. VISITORS. The hub (src/server/hub.ts) is the authority for where the
+//      humans in the room are; this serves it over SSE down and POST up,
+//      which is the transport the client half already speaks. The agents
+//      never come through here: they are the host's, drawn client-side.
 //   2. THE GAMEMASTER'S CONTROLS. A bulletin and the room's music are room
 //      state, so they are commands to the hub rather than anything a client
 //      holds.
@@ -14,7 +15,7 @@
 // it at anything real.
 
 import { randomUUID } from "node:crypto"
-import { getGameRoomHub, setGameRoomRoster, type GuestUser } from "../src/server/hub"
+import { getGameRoomHub, type HubVisitor } from "../src/server/hub"
 import { parseChat, parseInteract, parsePlayerInput } from "../src/lib/gameRoomNet/protocol"
 import { parseBulletinInput } from "../src/lib/game-room-control"
 import { parseRoomMusicInput } from "../src/lib/game-room-music"
@@ -23,19 +24,15 @@ const PORT = Number(process.env.PORT ?? 8787)
 /** Comment frames defeat idle-connection buffering in proxies. */
 const KEEPALIVE_MS = 15_000
 
-// The desks belong to the agents, which the host draws client-side; the hub
-// seats nobody at them.
-setGameRoomRoster([])
-
 /**
- * Visitors — everyone who connects. The room gives each a character with no
- * desk. They announce themselves on the way in (POST /api/identity); a
- * visitor the hub has never heard of is a spectator until they do.
+ * Visitors — everyone who connects. They announce themselves on the way in
+ * (POST /api/identity); a visitor the hub has never heard of is a spectator
+ * until they do.
  */
-const guests = new Map<string, GuestUser>()
+const visitors = new Map<string, HubVisitor>()
 
 const hub = getGameRoomHub({
-  loadGuest: async (userId) => guests.get(userId) ?? null,
+  loadVisitor: async (userId) => visitors.get(userId) ?? null,
 })
 
 function json(data: unknown, status = 200): Response {
@@ -116,10 +113,10 @@ async function handle(request: Request): Promise<Response> {
 
   // ------------------------------------------------------------ multiplayer
   if (path === "/api/identity" && post) {
-    const input = (await body(request)) as Partial<GuestUser> | null
+    const input = (await body(request)) as Partial<HubVisitor> | null
     const id = userIdFor(request)
     if (!input || typeof input.name !== "string") return badRequest("INVALID_INPUT")
-    guests.set(id, {
+    visitors.set(id, {
       id,
       name: input.name.trim() || "Visitor",
       role: input.role ?? "visitor",

@@ -33,7 +33,6 @@ function createSceneHandle(): RoomSceneHandle {
     removeAgent: vi.fn(),
     say() {},
     setNetStates() {},
-    setWanderStates() {},
     setLocalPlayer() {},
     setLocalInputDisabled: vi.fn(),
     setBoard() {},
