@@ -89,4 +89,4 @@ export function buildDeck(id: DeckId, rng: Rng): Card[] {
 
 // The desk → house deck lookup lives in house-deck.ts so the room can import
 // it without this file; re-exported here for the game side and the tests.
-export { DECK_IDS, exhibitionOrdinal, houseDeckForDesk } from "./house-deck"
+export { DECK_IDS, houseDeskOrdinal, houseDeckForDesk, houseNameForDesk } from "./house-deck"

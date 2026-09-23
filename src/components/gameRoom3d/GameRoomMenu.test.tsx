@@ -1,9 +1,8 @@
 import { useState } from "react"
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import type { TeamDTO } from "~/lib/event-types"
+import type { Agent } from "~/lib/agents"
 import type { GameRoomMenuData, GameRoomMenuPerson } from "~/lib/game-room-menu"
-import { teamColor } from "~/lib/team-colors"
 import { GameRoomMenu } from "./GameRoomMenu"
 import { GRAPHICS_PREFERENCE_KEY, type GraphicsPreference } from "./quality-tier"
 
@@ -20,43 +19,31 @@ vi.mock("~/components/SiteAudio", () => ({
 
 vi.mock("./GameRoomMenuSprite", () => ({
   GameRoomMenuSprite: ({ person, scale }: { person: GameRoomMenuPerson; scale: number }) => <img alt={`${person.name} walking`} data-scale={scale} />,
+  GameRoomMenuAgentSprite: ({ agent, scale }: { agent: Agent; scale: number }) => <img alt={`${agent.name} walking`} data-scale={scale} />,
 }))
 
-const studentMenu = {
+const visitorMenu = {
   me: {
-    id: "student-1",
+    id: "visitor-1",
     name: "Ada",
-    role: "student",
+    role: "visitor",
     spriteId: 3,
     spriteSheet: null,
-    teamName: "TEAM ALPHA",
     playerIdx: 0,
     teamIdx: 0,
   },
-  peers: [{
-    id: "student-2",
-    name: "Lin",
-    role: "student",
-    spriteId: 4,
-    spriteSheet: null,
-    teamName: "TEAM ALPHA",
-    playerIdx: 1,
-    teamIdx: 0,
-  }],
 } satisfies GameRoomMenuData
 
 function Harness({
-  data = studentMenu,
+  data = visitorMenu,
   touchControlsVisible = false,
-  teams,
-  focusTeamIdx = null,
+  agents,
   startOpen = false,
   onGraphicsChange,
 }: {
   data?: GameRoomMenuData
   touchControlsVisible?: boolean
-  teams?: TeamDTO[]
-  focusTeamIdx?: number | null
+  agents?: Agent[]
   startOpen?: boolean
   onGraphicsChange?: (preference: GraphicsPreference) => void
 }) {
@@ -67,28 +54,17 @@ function Harness({
       open={open}
       onOpenChange={setOpen}
       touchControlsVisible={touchControlsVisible}
-      teams={teams}
-      focusTeamIdx={focusTeamIdx}
+      agents={agents}
       onGraphicsChange={onGraphicsChange}
     />
   )
 }
 
-const TEAMS: TeamDTO[] = [
-  { id: "t0", name: "TEAM ALPHA", players: [
-    { id: "student-1", name: "Ada", role: "student", spriteId: 3, spriteSheet: null },
-    { id: "student-2", name: "Lin", role: "student", spriteId: 4, spriteSheet: null },
-  ] },
-  { id: "t1", name: "TEAM BETA", players: [
-    { id: "student-3", name: "Rui", role: "student", spriteId: 5, spriteSheet: null },
-  ] },
+const AGENTS: Agent[] = [
+  { id: "planner", name: "Planner", status: "working", activity: "Reading the diff" },
+  { id: "coder", name: "Lin", status: "waiting" },
+  { id: "tester", name: "Rui", status: "idle" },
 ]
-
-/** jsdom reports a style as rgb(); teamColor speaks hex. */
-function hexToRgb(hex: string): string {
-  const n = parseInt(hex.slice(1), 16)
-  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`
-}
 
 describe("GameRoomMenu", () => {
   it("opens and closes from its visible trigger", () => {
@@ -300,14 +276,14 @@ describe("GameRoomMenu", () => {
   it("consumes Enter while preserving focused menu-item activation", () => {
     render(<Harness />)
     fireEvent.click(screen.getByRole("button", { name: /menu/i }))
-    const teamItem = screen.getByRole("menuitem", { name: "Team" })
+    const teamItem = screen.getByRole("menuitem", { name: "Agents" })
     teamItem.focus()
     const downstreamKeydown = vi.fn()
     window.addEventListener("keydown", downstreamKeydown)
 
     try {
       fireEvent.keyDown(teamItem, { key: "Enter" })
-      expect(screen.getByRole("heading", { name: "Team" })).toBeTruthy()
+      expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy()
       expect(downstreamKeydown).not.toHaveBeenCalled()
     } finally {
       window.removeEventListener("keydown", downstreamKeydown)
@@ -320,49 +296,50 @@ describe("GameRoomMenu", () => {
     const menu = screen.getByRole("menu", { name: "Game room sections" })
     expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent?.trim())).toEqual([
       "Profile",
-      "Team",
+      "Agents",
       "Options",
     ])
     expect(screen.getByRole("heading", { name: "Profile" })).toBeTruthy()
     fireEvent.keyDown(window, { key: "ArrowDown" })
-    expect(screen.getByRole("heading", { name: "Team" })).toBeTruthy()
+    expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy()
     fireEvent.keyDown(window, { key: "ArrowUp" })
     fireEvent.keyDown(window, { key: "ArrowUp" })
     expect(screen.getByRole("heading", { name: "Options" })).toBeTruthy()
   })
 
-  it("renders the signed-in student profile", () => {
+  it("renders the visitor's profile", () => {
     render(<Harness />)
     fireEvent.click(screen.getByRole("button", { name: /menu/i }))
 
     expect(screen.getByText("Ada")).toBeTruthy()
-    expect(screen.getByText("USER ID: student-1")).toBeTruthy()
-    expect(screen.getByText("TEAM: TEAM ALPHA")).toBeTruthy()
+    expect(screen.getByText("USER ID: visitor-1")).toBeTruthy()
+    expect(screen.getByText("ROLE: VISITOR")).toBeTruthy()
     expect(screen.getByRole("img", { name: "Ada walking" }).getAttribute("data-scale")).toBe("3")
   })
 
-  it("renders teammates with their identity and walking sprites", () => {
-    render(<Harness />)
+  it("renders the agents with their status, activity and walking sprites", () => {
+    render(<Harness agents={AGENTS} />)
     fireEvent.click(screen.getByRole("button", { name: /menu/i }))
-    fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
+    fireEvent.click(screen.getByRole("menuitem", { name: "Agents" }))
 
-    const teammate = screen.getByTestId("game-room-team-member-student-2")
-    expect(within(teammate).getByText("Lin")).toBeTruthy()
-    expect(within(teammate).getByText("student-2")).toBeTruthy()
-    expect(within(teammate).getByRole("img", { name: "Lin walking" }).getAttribute("data-scale")).toBe("2")
+    const planner = screen.getByTestId("game-room-agent-planner")
+    expect(within(planner).getByText("Planner")).toBeTruthy()
+    expect(within(planner).getByText("WORKING · Reading the diff")).toBeTruthy()
+    expect(within(planner).getByRole("img", { name: "Planner walking" }).getAttribute("data-scale")).toBe("2")
+    expect(within(screen.getByTestId("game-room-agent-coder")).getByText("WAITING · Waiting for you")).toBeTruthy()
+    expect(within(screen.getByTestId("game-room-agent-tester")).getByText("IDLE")).toBeTruthy()
   })
 
-  it("renders mentor role and empty mentor roster", () => {
-    const mentorMenu: GameRoomMenuData = {
-      me: { ...studentMenu.me, id: "mentor-1", name: "Maya", role: "mentor", teamName: null },
-      peers: [],
+  it("renders a host's role and an empty room", () => {
+    const hostMenu: GameRoomMenuData = {
+      me: { ...visitorMenu.me, id: "host-1", name: "Maya", role: "host" },
     }
-    render(<Harness data={mentorMenu} />)
+    render(<Harness data={hostMenu} />)
     fireEvent.click(screen.getByRole("button", { name: /menu/i }))
 
-    expect(screen.getByText("ROLE: MENTOR")).toBeTruthy()
-    fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
-    expect(screen.getByText("NO OTHER MENTORS FOUND")).toBeTruthy()
+    expect(screen.getByText("ROLE: HOST")).toBeTruthy()
+    fireEvent.click(screen.getByRole("menuitem", { name: "Agents" }))
+    expect(screen.getByText("NO AGENTS IN THE ROOM")).toBeTruthy()
   })
 
   it("renders music controls in Options", () => {
@@ -374,11 +351,11 @@ describe("GameRoomMenu", () => {
   })
 
   it("changes content by pointer and Escape closes the overlay", () => {
-    render(<Harness />)
+    render(<Harness agents={AGENTS} />)
     fireEvent.click(screen.getByRole("button", { name: /menu/i }))
-    fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
-    expect(screen.getByRole("heading", { name: "Team" })).toBeTruthy()
-    expect(screen.getByTestId("game-room-team-member-student-2")).toBeTruthy()
+    fireEvent.click(screen.getByRole("menuitem", { name: "Agents" }))
+    expect(screen.getByRole("heading", { name: "Agents" })).toBeTruthy()
+    expect(screen.getByTestId("game-room-agent-coder")).toBeTruthy()
     fireEvent.keyDown(window, { key: "Escape" })
     expect(screen.queryByRole("dialog", { name: "Game room menu" })).toBeNull()
   })
@@ -392,8 +369,8 @@ describe("GameRoomMenu", () => {
 
   it("stays open when a click lands inside a panel", () => {
     render(<Harness startOpen />)
-    fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
-    fireEvent.click(screen.getByRole("heading", { name: "Team" }))
+    fireEvent.click(screen.getByRole("menuitem", { name: "Agents" }))
+    fireEvent.click(screen.getByRole("heading", { name: "Agents" }))
     expect(screen.getByRole("dialog", { name: "Game room menu" })).toBeTruthy()
   })
 
@@ -404,25 +381,26 @@ describe("GameRoomMenu", () => {
 })
 
 
-describe("GameRoomMenu team section", () => {
-  it("shows your teammates", () => {
-    render(<Harness teams={TEAMS} startOpen />)
-    fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
+describe("GameRoomMenu agents section", () => {
+  it("lists every agent when opened", () => {
+    render(<Harness agents={AGENTS} startOpen />)
+    fireEvent.click(screen.getByRole("menuitem", { name: "Agents" }))
     expect(screen.getByText("Lin")).toBeTruthy()
-  })
-
-  it("shows the desk's team instead when one is in focus, and opens on Team", () => {
-    render(<Harness teams={TEAMS} focusTeamIdx={1} startOpen />)
-    expect(screen.getByRole("heading", { name: "Team" })).toBeTruthy()
-    expect(screen.getByText("TEAM BETA")).toBeTruthy()
     expect(screen.getByText("Rui")).toBeTruthy()
-    expect(screen.queryByText("Lin")).toBeNull()
   })
 
-  it("marks the focused team with its own colour", () => {
-    render(<Harness teams={TEAMS} focusTeamIdx={1} startOpen />)
-    const swatch = screen.getByTestId("team-swatch")
-    expect(swatch.style.background).toBe(hexToRgb(teamColor("TEAM BETA")))
+  it("lets the host rename a status line", () => {
+    render(
+      <GameRoomMenu
+        data={visitorMenu}
+        open
+        onOpenChange={() => {}}
+        agents={[{ id: "coder", name: "Lin", status: "waiting" }]}
+        statusStyles={{ waiting: { bubble: "Needs approval" } }}
+      />,
+    )
+    fireEvent.click(screen.getByRole("menuitem", { name: "Agents" }))
+    expect(screen.getByText("WAITING · Needs approval")).toBeTruthy()
   })
 })
 

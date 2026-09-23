@@ -1,27 +1,25 @@
 import { useState, useRef, useEffect } from "react"
-import type { FlatPlayer } from "~/lib/event-types"
+import { effectiveStatus, type Agent } from "~/lib/agents"
 
-interface StudentSelectorProps {
-  players: FlatPlayer[]
-  value: number | null
-  onChange: (playerIdx: number | null) => void
+interface AgentFinderProps {
+  agents: readonly Agent[]
+  value: string | null
+  onChange: (agentId: string | null) => void
   placeholder?: string
 }
 
-export function StudentSelector({ players, value, onChange, placeholder = "Find student..." }: StudentSelectorProps) {
+export function AgentFinder({ agents, value, onChange, placeholder = "Find an agent..." }: AgentFinderProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [highlightedIdx, setHighlightedIdx] = useState(0)
   const containerRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const selectedPlayer = value !== null ? players[value] : null
+  const selected = value !== null ? agents.find((agent) => agent.id === value) ?? null : null
 
   const filtered = query.trim()
-    ? players.filter((p) =>
-        p.name.toLowerCase().includes(query.toLowerCase())
-      )
-    : players
+    ? agents.filter((agent) => agent.name.toLowerCase().includes(query.toLowerCase()))
+    : agents
 
   useEffect(() => {
     setHighlightedIdx(0)
@@ -37,8 +35,8 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
     return () => document.removeEventListener("mousedown", onClickOutside)
   }, [])
 
-  const handleSelect = (playerIdx: number) => {
-    onChange(playerIdx)
+  const handleSelect = (agentId: string) => {
+    onChange(agentId)
     setQuery("")
     setIsOpen(false)
     inputRef.current?.blur()
@@ -70,7 +68,7 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
       case "Enter":
         e.preventDefault()
         if (filtered[highlightedIdx]) {
-          handleSelect(players.indexOf(filtered[highlightedIdx]!))
+          handleSelect(filtered[highlightedIdx]!.id)
         }
         break
       case "Escape":
@@ -80,7 +78,7 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
     }
   }
 
-  const displayValue = selectedPlayer && !isOpen ? selectedPlayer.name : query
+  const displayValue = selected && !isOpen ? selected.name : query
 
   return (
     <div ref={containerRef} style={{ position: "relative" }}>
@@ -106,7 +104,7 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
           onChange={(e) => {
             setQuery(e.target.value)
             setIsOpen(true)
-            if (selectedPlayer) onChange(null)
+            if (selected) onChange(null)
           }}
           onFocus={() => setIsOpen(true)}
           onKeyDown={handleKeyDown}
@@ -123,7 +121,7 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
             minWidth: 0,
           }}
         />
-        {selectedPlayer && (
+        {selected && (
           <button
             onClick={handleClear}
             style={{
@@ -167,18 +165,15 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
                 color: "#5D6699",
               }}
             >
-              No students found
+              No agents found
             </div>
           ) : (
-            filtered.map((player, idx) => {
-              const playerIdx = players.indexOf(player)
+            filtered.map((agent, idx) => {
               const isHighlighted = idx === highlightedIdx
-              const teamName = player.teamName
-
               return (
                 <button
-                  key={playerIdx}
-                  onClick={() => handleSelect(playerIdx)}
+                  key={agent.id}
+                  onClick={() => handleSelect(agent.id)}
                   onMouseEnter={() => setHighlightedIdx(idx)}
                   style={{
                     display: "flex",
@@ -205,7 +200,7 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {player.name}
+                    {agent.name}
                   </span>
                   <span
                     style={{
@@ -216,7 +211,7 @@ export function StudentSelector({ players, value, onChange, placeholder = "Find 
                       flexShrink: 0,
                     }}
                   >
-                    {teamName}
+                    {effectiveStatus(agent, agents).toUpperCase()}
                   </span>
                 </button>
               )

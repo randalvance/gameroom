@@ -1,7 +1,9 @@
 // Client-safe types + pure helpers for the roster: teams and the people on
 // them. No server imports here — this module is bundled into the client.
 
-export type PlayerRole = "student" | "mentor" | "judge" | "admin" | "viewer"
+import type { Role } from "./auth"
+
+export type PlayerRole = Role
 
 export interface PlayerDTO {
   id: string

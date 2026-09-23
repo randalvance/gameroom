@@ -10,8 +10,8 @@ import { GAME_ROOM_BACKGROUND_TRACKS, GAME_ROOM_MUSIC, GAME_ROOM_SONGS, type Mus
 /**
  * What the gamemaster has asked the projector and viewer screens to play.
  * Null is the room's own alternating playlist; `track` loops one track; `stop`
- * is silence. STATE rather than a moment, like the pinned wall page: hello
- * carries it, so a screen that reconnects mid-hold plays what the others do.
+ * is silence. STATE rather than a moment: hello carries it, so a screen that
+ * reconnects mid-hold plays what the others do.
  */
 export type RoomMusic = { mode: "track"; track: string } | { mode: "stop" } | null
 
@@ -51,12 +51,12 @@ export function parseRoomMusicInput(input: unknown): RoomMusic {
 }
 
 /**
- * What a room plays under a command. Only the PA screens — the admin laptop
- * and the viewer account on the big screen — obey it; a student's laptop keeps
- * the room's own playlist, the same split as the filmed broadcasts.
+ * What a room plays under a command. Only the PA screens — the host's laptop
+ * and a screen account driving a projector — obey it; a visitor's laptop
+ * keeps the room's own playlist.
  */
 export function roomMusicRequest(music: RoomMusic | undefined, role: string): MusicRequest {
-  if (!music || (role !== "admin" && role !== "viewer")) return GAME_ROOM_MUSIC
+  if (!music || (role !== "host" && role !== "screen")) return GAME_ROOM_MUSIC
   if (music.mode === "stop") return []
   return music.track
 }

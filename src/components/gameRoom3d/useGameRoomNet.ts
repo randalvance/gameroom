@@ -1,8 +1,7 @@
-// Client side of the multiplayer game room. Opens the SSE stream, translates
-// the hub's session idx space into this page's playerIdx space (matched on
-// users.id via the hello roster), and drives the scene handle imperatively —
-// positions never flow through React props, so the WebGL scene is never
-// rebuilt by a snapshot.
+// Client side of the multiplayer game room. Opens the SSE stream, mints a
+// player index per connected visitor, and drives the scene handle
+// imperatively — positions never flow through React props, so the WebGL
+// scene is never rebuilt by a snapshot.
 //
 // Degrades cleanly: while the stream is down (server restart, network) the
 // scene simply keeps its local wander, and EventSource's own reconnect brings
@@ -10,7 +9,6 @@
 // does the same on purpose (see `on`).
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { FlatPlayer } from "~/lib/event-types"
 import { track } from "~/lib/analytics"
 import { facingForInput } from "~/lib/gameRoomNet/collision"
 import { OBJECT_IDX_BASE } from "~/lib/gameRoomNet/objects"
@@ -60,7 +58,6 @@ export interface GameRoomChatLine {
 const CHAT_LOG_MAX = 100
 
 export interface GameRoomGuest {
-  /** users.id */
   id: string
   playerIdx: number
 }
@@ -77,8 +74,7 @@ export interface GameRoomNet {
   onlineCount: number
   /** This user's own character, or null for spectators. */
   myPlayerIdx: number | null
-  /** The connected visitors — characters off this page's roster — each at
-   * the player index minted for them, so the room can seat their pets. */
+  /** The connected visitors, each at the player index minted for them. */
   guests: GameRoomGuest[]
   /** The stream is up and hello has landed. */
   connected: boolean
@@ -115,8 +111,7 @@ interface NetSession {
    * entry), kept so a scene that mounts after the frame can still be given
    * it. An entry is dropped the moment a snapshot streams the character. */
   lastWanders: Map<number, WanderEntry>
-  /** Connected visitors (hub idx → roster entry) — characters this page's own
-   * roster has never heard of; the scene adds them dynamically. */
+  /** Connected visitors (hub idx → roster entry); the scene adds them dynamically. */
   guests: Map<number, RosterEntryDTO>
 }
 
@@ -130,11 +125,9 @@ const emptySession = (): NetSession => ({
   guests: new Map(),
 })
 
-export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
+export function useGameRoomNet(): GameRoomNet {
   const handleRef = useRef<RoomSceneHandle | null>(null)
   const sessionRef = useRef<NetSession>(emptySession())
-  const allPlayersRef = useRef(allPlayers)
-  allPlayersRef.current = allPlayers
 
   const [onlineCount, setOnlineCount] = useState(0)
   // Bumped to throw the stream away and open a fresh one, whose hello resyncs
@@ -163,13 +156,10 @@ export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
   }, [])
 
   // Guest characters this hook has told the scene about (hub idx → the local
-  // playerIdx it minted). Local guest indices sit above the page roster —
-  // base + hubIdx — so they are unique AND stable across reconnects.
+  // playerIdx it minted). A visitor's local index IS its hub index: unique,
+  // stable across reconnects, and clear of the room's own index ranges.
   const sceneGuestsRef = useRef(new Map<number, number>())
-  const guestLocalIdx = useCallback(
-    (hubIdx: number) => allPlayersRef.current.length + hubIdx,
-    [],
-  )
+  const guestLocalIdx = useCallback((hubIdx: number) => hubIdx, [])
 
   /** Reconcile the scene's guest cast with the session's connected guests,
    * and publish who they are. */
@@ -280,18 +270,13 @@ export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
       states.reduce((n, e) => n + (unpackState(e).live ? 1 : 0), 0)
 
     on<HelloEvent>("hello", (hello) => {
-      const byId = new Map(allPlayersRef.current.map((p, playerIdx) => [p.id, playerIdx]))
       const s = emptySession()
       for (const entry of hello.roster) {
-        if (entry.guest) {
-          const playerIdx = guestLocalIdx(entry.idx)
-          s.guests.set(entry.idx, entry)
-          s.idxToPlayerIdx.set(entry.idx, playerIdx)
-          s.playerIdxToIdx.set(playerIdx, entry.idx)
-          continue
-        }
-        const playerIdx = byId.get(entry.id)
-        if (playerIdx === undefined) continue // hub knows them, this page's roster doesn't
+        // Only visitors are drawn here: a hub still seating a roster of its
+        // own is talking about characters this room does not have.
+        if (!entry.guest) continue
+        const playerIdx = guestLocalIdx(entry.idx)
+        s.guests.set(entry.idx, entry)
         s.idxToPlayerIdx.set(entry.idx, playerIdx)
         s.playerIdxToIdx.set(playerIdx, entry.idx)
       }

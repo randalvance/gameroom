@@ -51,7 +51,7 @@ export function Wardrobe({
           THE GAME ROOM
         </h1>
         <p style={{ color: "#9AA4D4", margin: 0, fontSize: 16 }}>
-          Pick a character, walk in, and talk to whoever is standing around.
+          Pick a character, walk in, and see what the agents are up to.
           Three things in there are not signposted — that is the point.
         </p>
       </header>

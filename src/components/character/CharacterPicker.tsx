@@ -20,7 +20,7 @@ import { useEffect, useState, type ReactNode } from "react"
 import { track } from "~/lib/analytics"
 import { SpriteWalkPreview } from "~/components/sprite/SpriteWalkPreview"
 import { characterSheetUrl } from "~/components/gameRoom/assets"
-import { CUSTOM_SPRITE_ID, SPRITE_COUNT, type SharedSpriteView } from "~/lib/roster"
+import { CUSTOM_SPRITE_ID, SPRITE_COUNT, type SharedSpriteView } from "~/lib/sprites"
 import { type SpriteWriteResult } from "~/lib/sprite-gen"
 
 export interface CharacterPickerProps {

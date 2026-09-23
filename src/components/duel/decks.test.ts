@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { createRng } from "./rng"
-import { COPIES, DECKS, DECK_BY_ID, buildDeck, exhibitionOrdinal, houseDeckForDesk } from "./decks"
+import { HOUSE_TABLE_IDXS } from "~/components/gameRoom/constants"
+import { COPIES, DECKS, DECK_BY_ID, buildDeck, houseDeskOrdinal, houseDeckForDesk } from "./decks"
 
 describe("DECKS", () => {
   it("has four decks of eight unique cards in ascending cost", () => {
@@ -41,12 +42,10 @@ describe("buildDeck", () => {
 })
 
 describe("house deck for a desk", () => {
-  it("counts exhibition desks in room order and cycles the decks", () => {
-    const competing = [true, true, false, true, false, false]
-    expect(exhibitionOrdinal(competing, 2)).toBe(0)
-    expect(exhibitionOrdinal(competing, 4)).toBe(1)
-    expect(exhibitionOrdinal(competing, 5)).toBe(2)
-    expect(exhibitionOrdinal(competing, 0)).toBe(-1)
+  it("counts house desks in room order and cycles the decks", () => {
+    expect(houseDeskOrdinal(HOUSE_TABLE_IDXS, HOUSE_TABLE_IDXS[0]!)).toBe(0)
+    expect(houseDeskOrdinal(HOUSE_TABLE_IDXS, HOUSE_TABLE_IDXS[1]!)).toBe(1)
+    expect(houseDeskOrdinal(HOUSE_TABLE_IDXS, 0)).toBe(-1)
     expect([0, 1, 2, 3, 4].map(houseDeckForDesk)).toEqual(["bulls", "bears", "quants", "whales", "bulls"])
   })
 })

@@ -19,11 +19,12 @@
 export { GameRoom, type GameRoomProps } from "./gameroom/GameRoom"
 export { default as GameRoom3D, type GameRoom3DProps } from "./components/gameRoom3d/GameRoom3D"
 export { Room3DViewport } from "./components/gameRoom3d/Room3DViewport"
-export type { RoomSceneHandle, RoomSelfState, RoomPlayerInput } from "./components/gameRoom3d/scene"
+export type { RoomSceneHandle, RoomSelfState, RoomAgentInput } from "./components/gameRoom3d/scene"
+export type { RoomSelection } from "./components/gameRoom3d/selection"
 export { type RoomBoard, BOARD_MAX_LINES } from "./components/gameRoom3d/wall"
 export { useBulletin, type RoomBulletin, BULLETIN_DEFAULT_HOLD_MS } from "./components/gameRoom3d/useBulletin"
 export { qualitySettings, resolveQualityTier, type QualityTier } from "./components/gameRoom3d/quality-tier"
-export { PARTICIPANT_TABLES, CW, CH, TILE } from "./components/gameRoom/constants"
+export { PARTICIPANT_TABLES, HOUSE_TABLE_IDXS, AGENT_TABLE_IDXS, SEATS_PER_TABLE, CW, CH, TILE } from "./components/gameRoom/constants"
 export { roomTitle, setRoomTitle } from "./components/gameRoom3d/room-branding"
 
 // ------------------------------------------------------------- room pieces
@@ -32,7 +33,7 @@ export { GameRoomChatPanel } from "./components/gameRoom3d/GameRoomChatPanel"
 export { GameRoomDialogBox } from "./components/gameRoom3d/GameRoomDialogBox"
 export { RoomTouchControls, RotateToLandscape, useCoarsePointer, useIsPortrait } from "./components/gameRoom3d/TouchControls"
 export { RoomToast } from "./components/RoomToast"
-export { StudentSelector } from "./components/StudentSelector"
+export { AgentFinder } from "./components/AgentFinder"
 
 // ----------------------------------------------------------- multiplayer
 export { useGameRoomNet, type GameRoomNet, type GameRoomDialog, type GameRoomChatLine } from "./components/gameRoom3d/useGameRoomNet"
@@ -51,14 +52,14 @@ export {
   type ResolvedSprite,
   type WalkDir,
 } from "./components/gameRoom/spriteIndex"
-export { CUSTOM_SPRITE_ID, SPRITE_COUNT, isSharedSpriteId, sharedSpriteUrl, type SharedSpriteView } from "./lib/roster"
+export { CUSTOM_SPRITE_ID, SPRITE_COUNT, isSharedSpriteId, sharedSpriteUrl, type SharedSpriteView } from "./lib/sprites"
 export { SPRITE_COLS, SPRITE_ROWS, WALK_FRAME_SEQUENCE, type SpriteWriteResult } from "./lib/sprite-gen"
 
 // ----------------------------------------------------------- easter eggs
 export { ArcadePortal } from "./components/arcade/ArcadePortal"
 export { BackroomsPortal } from "./components/backrooms/BackroomsPortal"
 export { DuelPortal } from "./components/duel/DuelPortal"
-export { houseDeckForDesk, exhibitionOrdinal } from "./components/duel/house-deck"
+export { houseDeckForDesk, houseDeskOrdinal, houseNameForDesk } from "./components/duel/house-deck"
 export type { DeckId } from "./components/duel/cards"
 export { createKonamiDetector, konamiTokenForKey } from "./lib/konami"
 
@@ -84,9 +85,22 @@ export {
 } from "./lib/menu-sounds"
 
 // ------------------------------------------------------------------- data
-export { buildAllPlayers, type TeamDTO, type FlatPlayer, type PlayerRole } from "./lib/event-types"
-export { projectGameRoomMenuData, teamRosterFor, type GameRoomMenuData, type GameRoomMenuPerson } from "./lib/game-room-menu"
-export { teamColor } from "./lib/team-colors"
+export {
+  AGENT_STATUSES,
+  DEFAULT_STATUS_STYLES,
+  agentBoardSummary,
+  bubbleTextFor,
+  countByStatus,
+  effectiveStatus,
+  styleFor,
+  type Agent,
+  type AgentStatus,
+  type ResolvedStatusStyle,
+  type StatusStyle,
+  type StatusStyleOverrides,
+} from "./lib/agents"
+export { type TeamDTO, type PlayerRole } from "./lib/event-types"
+export { type GameRoomMenuData, type GameRoomMenuPerson } from "./lib/game-room-menu"
 export { normalizeRole, KNOWN_ROLES, type Role } from "./lib/auth"
 
 // --------------------------------------------------------------- plumbing

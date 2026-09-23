@@ -1,23 +1,25 @@
 import { logger } from "~/lib/logger"
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 import { CW, CH } from "../gameRoom/constants"
-import type { RoomSelection } from "../gameRoom/InfoPanel"
+import { effectiveStatus, styleFor, type Agent, type StatusStyleOverrides } from "~/lib/agents"
 import {
   nextRoomCameraPan,
   type RoomCameraPan,
   type RoomCameraPanAction,
 } from "./camera-pan"
-import type { RoomPlayerInput, RoomSceneHandle, RoomSelfState } from "./scene"
+import type { RoomAgentInput, RoomSceneHandle, RoomSelfState } from "./scene"
+import type { RoomSelection } from "./selection"
 import type { RoomBoard } from "./wall"
 import { RoomTouchControls, useCoarsePointer, type TouchPadPress } from "./TouchControls"
 
 export interface Room3DViewportProps {
-  players: RoomPlayerInput[]
-  teamLabels: string[]
-  /** Whether each desk belongs to a competing team, aligned with teamLabels. */
-  teamCompeting?: readonly boolean[]
-  selectedTeamIdx?: number | null
-  selectedPlayerIdx?: number | null
+  /** The agents in the room. Diffed against the last render: an agent that
+   * appears walks in, one that goes fades out, one that changes is retinted
+   * in place. Never rebuilds the scene. */
+  agents: readonly Agent[]
+  /** The host's overrides of how each status looks. */
+  statusStyles?: StatusStyleOverrides
+  selected?: RoomSelection
   cameraControls?: boolean
   /** WASD/arrows are being spent on walking the local character — keep the
    * zoom keys and drag-pan, but stand the keyboard pan down. */
@@ -68,6 +70,8 @@ export interface Room3DViewportProps {
   onSceneReady?: (handle: RoomSceneHandle | null) => void
   onSelfState?: (state: RoomSelfState) => void
   onInteract?: (targetPlayerIdx: number) => void
+  /** The local player pressed interact while facing this agent. */
+  onAgentInteract?: (agentId: string) => void
   onTableInteract?: (tableIdx: number) => void
   /** Interact fired while facing Primey — local only. */
   onPrimeyInteract?: () => void
@@ -158,45 +162,62 @@ export function RoomCameraLegend({ walkMode = false, onMenuToggle }: { walkMode?
 }
 
 /**
- * A generated sheet is a base64 PNG data URL — tens of kilobytes per player —
- * and the identity key is serialized on every render, so the key carries a
- * digest rather than the sheet itself. Length plus the tail is enough: two
- * different PNGs of the same byte length ending in the same 24 characters is
- * not a case the room has to survive, and a re-encode of the SAME sheet must
- * not read as a change (which is why this is not a counter).
+ * The agents as the scene takes them: status rolled up through their
+ * children and the look for it resolved, so the scene never has to know
+ * about parents or the host's overrides.
  */
-function sheetDigest(sheet: string | null | undefined): string | null {
-  return sheet ? `${sheet.length}:${sheet.slice(-24)}` : null
-}
-
-export function room3DSceneIdentityKey(input: {
-  players: readonly RoomPlayerInput[]
-  teamLabels: readonly string[]
-  teamCompeting?: readonly boolean[]
-}): string {
-  return JSON.stringify({
-    teamLabels: input.teamLabels,
-    teamCompeting: input.teamCompeting,
-    // The sprite fields belong here even though team assignments deliberately
-    // do NOT: a team change is applied to a live scene through the handle,
-    // whereas a character is baked into its mesh when the scene is built and
-    // there is no handle to swap it.
-    players: input.players.map(({ playerIdx, name, seatIdx, spriteId, spriteSheet }) => ({
-      playerIdx,
-      name,
-      seatIdx,
-      spriteId: spriteId ?? null,
-      spriteSheet: sheetDigest(spriteSheet),
-    })),
+export function roomAgentInputs(agents: readonly Agent[], statusStyles?: StatusStyleOverrides): RoomAgentInput[] {
+  return agents.map((agent) => {
+    const status = effectiveStatus(agent, agents)
+    return {
+      id: agent.id,
+      name: agent.name,
+      status,
+      style: styleFor(status, statusStyles),
+      activity: agent.activity,
+      sprite: agent.sprite,
+      color: agent.color,
+    }
   })
 }
 
+/** Is this the same input the scene already has? Cheap enough per render. */
+function sameAgentInput(a: RoomAgentInput, b: RoomAgentInput): boolean {
+  return (
+    a.name === b.name &&
+    a.status === b.status &&
+    a.style === b.style &&
+    a.activity === b.activity &&
+    a.sprite === b.sprite &&
+    a.color === b.color
+  )
+}
+
+/**
+ * Bring the scene's cast up to the host's list: new agents go in, missing
+ * ones go, changed ones are retinted. Returns what the scene now holds.
+ */
+export function syncRoomAgents(
+  handle: Pick<RoomSceneHandle, "upsertAgent" | "removeAgent">,
+  previous: ReadonlyMap<string, RoomAgentInput>,
+  next: readonly RoomAgentInput[],
+): Map<string, RoomAgentInput> {
+  const current = new Map<string, RoomAgentInput>()
+  for (const agent of next) {
+    current.set(agent.id, agent)
+    const before = previous.get(agent.id)
+    if (!before || !sameAgentInput(before, agent)) handle.upsertAgent(agent)
+  }
+  for (const id of previous.keys()) {
+    if (!current.has(id)) handle.removeAgent(id)
+  }
+  return current
+}
+
 export function Room3DViewport({
-  players,
-  teamLabels,
-  teamCompeting,
-  selectedTeamIdx = null,
-  selectedPlayerIdx = null,
+  agents,
+  statusStyles,
+  selected = null,
   cameraControls = false,
   suppressPanKeys = false,
   localInputDisabled = false,
@@ -219,17 +240,18 @@ export function Room3DViewport({
   onSceneReady,
   onSelfState,
   onInteract,
+  onAgentInteract,
   onTableInteract,
   onPrimeyInteract,
   onMenuToggle,
 }: Room3DViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const handleRef = useRef<RoomSceneHandle | null>(null)
-  const playersRef = useRef(players)
   const onPickRef = useRef(onPick)
   const onSceneReadyRef = useRef(onSceneReady)
   const onSelfStateRef = useRef(onSelfState)
   const onInteractRef = useRef(onInteract)
+  const onAgentInteractRef = useRef(onAgentInteract)
   const onTableInteractRef = useRef(onTableInteract)
   const onPrimeyInteractRef = useRef(onPrimeyInteract)
   const onBackroomsEnterRef = useRef(onBackroomsEnter)
@@ -242,18 +264,21 @@ export function Room3DViewport({
   const cameraZoomRef = useRef(cameraZoom)
   const cameraPanRef = useRef(cameraPan)
   const localInputDisabledRef = useRef(localInputDisabled)
+  const selectedRef = useRef(selected)
   const lastWheelZoomAtRef = useRef(Number.NEGATIVE_INFINITY)
   const [ready, setReady] = useState(false)
   const [loadError, setLoadError] = useState<Error | null>(null)
   const [retryKey, setRetryKey] = useState(0)
   const coarsePointer = useCoarsePointer()
   const showTouchControls = touchControls && coarsePointer
+  /** What the scene holds, by agent id, so a render only sends the delta. */
+  const sceneAgentsRef = useRef(new Map<string, RoomAgentInput>())
 
-  playersRef.current = players
   onPickRef.current = onPick
   onSceneReadyRef.current = onSceneReady
   onSelfStateRef.current = onSelfState
   onInteractRef.current = onInteract
+  onAgentInteractRef.current = onAgentInteract
   onTableInteractRef.current = onTableInteract
   onPrimeyInteractRef.current = onPrimeyInteract
   onBackroomsEnterRef.current = onBackroomsEnter
@@ -262,32 +287,22 @@ export function Room3DViewport({
   cameraZoomRef.current = cameraZoom
   cameraPanRef.current = cameraPan
   localInputDisabledRef.current = localInputDisabled
-
-  // Team changes flow through the scene handle. Recreate only when the cast
-  // or the immutable desk labels and categories changes.
-  const sceneIdentityKey = useMemo(() => room3DSceneIdentityKey({
-    teamLabels,
-    teamCompeting,
-    players,
-  }), [players, teamCompeting, teamLabels])
+  selectedRef.current = selected
 
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     let cancelled = false
     let handle: RoomSceneHandle | null = null
-    const initialPlayers = playersRef.current
     setReady(false)
     setLoadError(null)
 
     import("./scene")
       .then(({ createRoomScene }) => createRoomScene(container, {
-        players: initialPlayers,
-        teamLabels,
-        teamCompeting,
         onPick: (pick) => onPickRef.current?.(pick),
         onSelfState: (state) => onSelfStateRef.current?.(state),
         onInteract: (targetPlayerIdx) => onInteractRef.current?.(targetPlayerIdx),
+        onAgentInteract: (agentId) => onAgentInteractRef.current?.(agentId),
         onTableInteract: (tableIdx) => onTableInteractRef.current?.(tableIdx),
         onPrimeyInteract: () => onPrimeyInteractRef.current?.(),
         onBackroomsEnter: () => onBackroomsEnterRef.current?.(),
@@ -306,12 +321,11 @@ export function Room3DViewport({
         }
         handle = created
         handleRef.current = created
-        for (const player of playersRef.current) {
-          created.setPlayerTeam(player.playerIdx, player.teamIdx)
-        }
+        // A fresh scene holds nobody: the agents effect below seats everyone.
+        sceneAgentsRef.current = new Map()
         created.setCameraZoom(cameraZoomRef.current)
         created.setCameraPan(cameraPanRef.current.x, cameraPanRef.current.z)
-        created.setSelection(selectedTeamIdx, selectedPlayerIdx)
+        created.setSelection(selectedRef.current)
         created.setLocalInputDisabled(localInputDisabledRef.current)
         setReady(true)
         onSceneReadyRef.current?.(created)
@@ -333,19 +347,18 @@ export function Room3DViewport({
       if (handleRef.current === handle) handleRef.current = null
       handle?.dispose()
     }
-  // The serialized identity deliberately excludes mutable team assignments.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [retryKey, sceneIdentityKey])
+  }, [retryKey])
 
+  // The cast goes through the handle: nobody's arrival rebuilds the room.
   useEffect(() => {
     const handle = handleRef.current
-    if (!handle) return
-    for (const player of players) handle.setPlayerTeam(player.playerIdx, player.teamIdx)
-  }, [players, ready])
+    if (!handle || !ready) return
+    sceneAgentsRef.current = syncRoomAgents(handle, sceneAgentsRef.current, roomAgentInputs(agents, statusStyles))
+  }, [agents, statusStyles, ready])
 
   useEffect(() => {
-    handleRef.current?.setSelection(selectedTeamIdx, selectedPlayerIdx)
-  }, [ready, selectedPlayerIdx, selectedTeamIdx])
+    handleRef.current?.setSelection(selected)
+  }, [ready, selected])
 
   useEffect(() => {
     handleRef.current?.setBackroomsUnlocked?.(backroomsUnlocked)
@@ -372,9 +385,8 @@ export function Room3DViewport({
     handleRef.current?.setRenderPaused?.(renderPaused)
   }, [ready, renderPaused])
 
-  // The wall's contents go through the handle exactly as team changes do.
-  // Rebuilding the room for a line of text would drop the camera, the walk
-  // and everyone's position.
+  // The wall's contents go through the handle too. Rebuilding the room for a
+  // line of text would drop the camera, the walk and everyone's position.
   useEffect(() => {
     handleRef.current?.setBoard(board)
   }, [board, ready])

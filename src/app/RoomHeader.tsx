@@ -2,12 +2,10 @@
 // here, which is why <GameRoom> takes it as a prop.
 
 export function RoomHeader({
-  players,
-  teams,
+  agents,
   onLeave,
 }: {
-  players: number
-  teams: number
+  agents: number
   onLeave: () => void
 }) {
   const chip = (label: string, background: string, color: string) => (
@@ -57,8 +55,7 @@ export function RoomHeader({
       </button>
       <div style={{ flex: 1, minWidth: 0 }} />
       <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        {chip(`${players} CHARACTERS`, "#9AA4D4", "#000")}
-        {chip(`${teams} DESKS`, "var(--color-blue)", "#FFF")}
+        {chip(`${agents} AGENTS`, "var(--color-blue)", "#FFF")}
         {chip("◆ LIVE", "var(--color-neon)", "#000")}
       </div>
     </header>

@@ -10,7 +10,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js"
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js"
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js"
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js"
-import { CW, CH, TILE, WALL_Y, PARTICIPANT_TABLES } from "../gameRoom/constants"
+import { AGENT_TABLE_IDXS, CW, CH, PARTICIPANT_TABLES, SEATS_PER_TABLE, TILE, WALL_Y } from "../gameRoom/constants"
 import { CHAR_COUNT, characterSheetUrl } from "../gameRoom/assets"
 import {
     characterIdForPlayer,
@@ -23,9 +23,11 @@ import {
     buildStaticColliders,
     facingForInput,
     movePlayer,
+    nearestFreePoint,
     PLAYER_SPEED_PX_PER_STEP,
     type ProbeCandidate,
 } from "../../lib/gameRoomNet/collision"
+import { bubbleTextFor, hashAgentId, type AgentStatus, type ResolvedStatusStyle } from "../../lib/agents"
 import { seedWander, stepWander, WALK_SPEED } from "../../lib/gameRoomNet/wander"
 import { OBJECT_IDX_BASE, ROOM_OBJECTS, roomObjectByIdx } from "../../lib/gameRoomNet/objects"
 import { resolveRoomInteract, type RoomInteractTarget } from "../../lib/gameRoomNet/tables"
@@ -40,7 +42,7 @@ import {
 import { roomTitle } from "./room-branding"
 import { BIG_SCREEN_IDX, BIG_SCREEN_POINT, BOARD_MAX_LINES, type RoomBoard } from "./wall"
 import { localMinutes, parseTimeOverride, skyPalette } from "./time-of-day"
-import type { RoomSelection } from "../gameRoom/InfoPanel"
+import type { RoomSelection } from "./selection"
 import {
     CHARACTER_SCALE,
     characterGroundY,
@@ -53,14 +55,8 @@ import { createBackdrop } from "./backdrop"
 import { createBackroomsHatch, maskHatchOpening } from "./backrooms-hatch"
 import { ARCADE_IDX, ARCADE_POINT, createArcadeCabinet } from "./arcade-cabinet"
 import { createArcadeReveal, REVEAL, type ArcadeReveal } from "./arcade-reveal"
-import {
-    EMPTY_TABLE_LABEL,
-    isExhibitionDesk,
-    tableLegColorForCompetition,
-    tableHasTeam,
-    tableLabelText,
-    tableTopColorForCompetition,
-} from "./team-tables"
+import { isHouseTable } from "../gameRoom/constants"
+import { tableLegColorFor, tableTopColorFor } from "./desks"
 import { advanceSimClock } from "./sim-clock"
 import {
     clampRoomCameraPan,
@@ -100,16 +96,18 @@ import {
     type QualityTier,
 } from "./quality-tier"
 
-export interface RoomPlayerInput {
+/** An agent as the scene draws it: the host's agent, its status rolled up
+ * and its look resolved. Hand the same id in again to change any of it. */
+export interface RoomAgentInput {
+    id: string
     name: string
-    role?: RoomRole
-    teamIdx: number | null
-    seatIdx: number
-    playerIdx: number
-    /** Admin-assigned sprite override (users.sprite_id); null/absent = derived hash. */
-    spriteId?: number | null
-    /** Generated 4×4 sheet (users.sprite_sheet, PNG data URL); drawn only while spriteId = CUSTOM_SPRITE_ID. */
-    spriteSheet?: string | null
+    status: AgentStatus
+    style: ResolvedStatusStyle
+    activity?: string
+    /** A stock sheet index, or a URL to a 6×4 sheet. Absent derives one from the id. */
+    sprite?: number | string
+    /** Halo tint override, as a CSS hex colour. */
+    color?: string
 }
 
 /** A character position pushed from the multiplayer hub, room-plan px. */
@@ -143,10 +141,6 @@ export interface RoomSelfState {
 }
 
 export interface CreateRoomOptions {
-    players: RoomPlayerInput[]
-    teamLabels: string[]
-    /** Whether each desk belongs to a competing team, aligned with teamLabels. */
-    teamCompeting?: readonly boolean[]
     onPick?: (pick: RoomSelection) => void
     /** Dragging the floor moves the camera; this reports where it ended up. */
     onCameraPan?: (pan: RoomCameraPan) => void
@@ -155,9 +149,13 @@ export interface CreateRoomOptions {
     onCameraZoom?: (zoom: number) => void
     /** The local player's character moved/turned (throttled to ~10 Hz). */
     onSelfState?: (state: RoomSelfState) => void
-    /** The local player pressed interact while facing this character. */
+    /** The local player pressed interact while facing this visitor's character
+     * (or a room object). What happens next is the hub's. */
     onInteract?: (targetPlayerIdx: number) => void
-    /** The local player pressed interact while facing this team's desk. Unlike
+    /** The local player pressed interact while facing this agent. Local: the
+     * host decides what a conversation with an agent is. */
+    onAgentInteract?: (agentId: string) => void
+    /** The local player pressed interact while facing this desk. Unlike
      * onInteract this never reaches the hub — it opens local UI, broadcasts
      * nothing and freezes nobody. */
     onTableInteract?: (tableIdx: number) => void
@@ -184,10 +182,21 @@ export interface CreateRoomOptions {
 }
 
 export interface RoomSceneHandle {
-    setSelection(teamIdx: number | null, playerIdx: number | null): void
+    setSelection(selection: RoomSelection): void
     setCameraPan(x: number, z: number): void
     setCameraZoom(zoom: number): void
-    setPlayerTeam(playerIdx: number, teamIdx: number | null, animate?: boolean): void
+    /**
+     * An agent arrived, or changed. A new one is seated at the emptiest desk
+     * and walks in from the aisle; past the desks it stands in the aisle. A
+     * known one takes the new name, status, look and bubble in place.
+     */
+    upsertAgent(agent: RoomAgentInput): void
+    /** The agent is gone: it fades out where it stands and its seat frees. */
+    removeAgent(agentId: string): void
+    /** A speech bubble over an agent, for `ms` (the room's default when
+     * absent) — the host's answer to onAgentInteract, or anything else it
+     * wants said. */
+    say(agentId: string, text: string, ms?: number): void
     /** Hub-driven positions for remote characters (the local player is skipped). */
     setNetStates(states: readonly RoomNetState[]): void
     /** Idle characters, with the wander state to run them from locally. Each
@@ -393,21 +402,6 @@ function makeRugTexture(): THREE.CanvasTexture {
  * off-white sits near 0.67 linear luminance, so text is drawn and not lit.
  */
 const TEXT_BRIGHT = "#CBD6EC"
-
-function makeLabelTexture(label: string, gold: boolean, muted = false): THREE.CanvasTexture {
-    return makeCanvasTexture(160, 44, (ctx) => {
-        ctx.fillStyle = muted ? "rgba(4,8,24,0.5)" : "rgba(4,8,24,0.88)"
-        ctx.fillRect(0, 0, 160, 44)
-        ctx.strokeStyle = gold ? "#FFD040" : muted ? "#26325A" : "#3050c8"
-        ctx.lineWidth = 3
-        ctx.strokeRect(2, 2, 156, 40)
-        ctx.font = "bold 20px 'Courier New', monospace"
-        ctx.textAlign = "center"
-        ctx.textBaseline = "middle"
-        ctx.fillStyle = gold ? "#FFD040" : muted ? "#6C77A6" : "#cfdaff"
-        ctx.fillText(label, 80, 23)
-    })
-}
 
 function makeNameTagTexture(name: string): THREE.CanvasTexture {
     const label = (name.split(" ")[0] ?? name).toUpperCase()
@@ -615,8 +609,6 @@ const RoomGradeShader = {
 const MARKER_RISE = 0.54
 const HOVER_TAG_RISE = 0.89
 const SEL_TAG_RISE = 1.24
-/** Area headings (team tables, the arrivals platform) float this far overhead. */
-const AREA_LABEL_Y = NOMINAL_CHARACTER_TOP_Y + 0.64
 
 
 // WALK_SPEED now lives in lib/gameRoomNet/wander.ts, shared with the
@@ -626,8 +618,15 @@ const WALK_FRAME_STEPS = 6
 /** Peak of the hop a character makes when it moves between two seats. */
 const TRANSITION_HOP = 0.7
 
-/** How much of its colour and light an unused desk keeps — see team-tables.ts. */
-const EMPTY_TABLE_FADE = 0.42
+/** The sheet column every stock sheet keeps its hurt pose in. */
+const HURT_FRAME = 5
+/** How long a new agent takes to reach its desk from the aisle. */
+const AGENT_WALK_IN_MS = 1_400
+/** How long a departing agent takes to fade out. */
+const AGENT_FADE_OUT_MS = 700
+/** Where the private character indexes for agents start: clear of the hub's
+ * visitor indexes (small) and below the room objects (100 000). */
+const AGENT_IDX_BASE = 50_000
 
 
 /**
@@ -638,8 +637,28 @@ const EMPTY_TABLE_FADE = 0.42
  */
 const PAN_PROBE_PX = 100
 
+/** A bubble that stays up: the agent's status line over its head. */
+interface StatusBubble {
+    sprite: THREE.Sprite
+    material: THREE.SpriteMaterial
+    texture: THREE.CanvasTexture
+}
+
+interface AgentState {
+    id: string
+    style: ResolvedStatusStyle
+    bubbleText: string | null
+    bubble: StatusBubble | null
+    /** The desk and orbit slot it holds, or null when it stands in the aisle. */
+    seat: { table: number; seat: number } | null
+    /** A fade-out in progress, after which the character is removed. */
+    leaving: { startedAt: number } | null
+}
+
 interface CharState {
     mesh: THREE.Mesh
+    /** Set for an agent's character; null for a visitor's. */
+    agent: AgentState | null
     material: THREE.MeshLambertMaterial
     texture: THREE.Texture
     /** Cell size, direction rows and walk cycle, read off this sheet's image. */
@@ -1290,12 +1309,10 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
         const tableTopMaterials = new Map<number, THREE.MeshStandardMaterial | THREE.MeshLambertMaterial>()
         const tableMaterial = (
-            competing: boolean | undefined,
-            colorFor: (competing?: boolean) => number,
+            color: number,
             cache: Map<number, THREE.MeshStandardMaterial | THREE.MeshLambertMaterial>,
             roughness = 0.8,
         ) => {
-            const color = colorFor(competing)
             let material = cache.get(color)
             if (!material) {
                 material = track(surfaceMaterial({ color, roughness }))
@@ -1342,43 +1359,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const tableHitboxes: THREE.Mesh[] = []
         const hitboxGeo = track(new THREE.BoxGeometry(6.4, 2.6, 4))
         const hitboxMat = track(new THREE.MeshBasicMaterial({ visible: false }))
-        const labelSprites: Array<{
-            sprite: THREE.Sprite
-            baseLabel: string
-            normal: THREE.Texture
-            gold: THREE.Texture
-            hasTeam: boolean
-        }> = []
-
-        /** Is there a team behind the desk at this index, or is it just furniture? */
-        const hasTeamAt = (ti: number) => tableHasTeam(ti, opts.teamLabels.length)
-
-
-        // Faded twins of the furniture materials, one per original, so the unused
-        // desks read as switched off without every desk paying for its own copy.
-        const fadedMaterials = new Map<THREE.Material, THREE.Material>()
-        const fadedMaterial = (source: THREE.Material): THREE.Material => {
-            let faded = fadedMaterials.get(source)
-            if (!faded) {
-                faded = source.clone()
-                faded.transparent = true
-                faded.opacity = (source.opacity ?? 1) * EMPTY_TABLE_FADE
-                const tinted = faded as THREE.Material & { color?: THREE.Color }
-                tinted.color?.multiplyScalar(EMPTY_TABLE_FADE)
-                fadedMaterials.set(source, track(faded))
-            }
-            return faded
-        }
-        const fadeTable = (group: THREE.Group) => {
-            group.traverse((object) => {
-                if (!(object instanceof THREE.Mesh)) return
-                // The hitbox is already invisible, and an unused desk has none anyway.
-                if (object.material === hitboxMat) return
-                object.material = fadedMaterial(object.material as THREE.Material)
-                object.castShadow = false
-                object.receiveShadow = false
-            })
-        }
 
         const chairAt = (group: THREE.Group | THREE.Scene, dx: number, dz: number, rotY: number) => {
             const chair = new THREE.Group()
@@ -1403,31 +1383,24 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         PARTICIPANT_TABLES.forEach((tbl, ti) => {
             const cx = toX(tbl.x + tbl.w / 2)
             const cz = toZ(tbl.y + tbl.h / 2)
-            const hasTeam = hasTeamAt(ti)
-            const exhibitionDesk = hasTeam && isExhibitionDesk(ti, opts.teamCompeting)
+            const houseDesk = isHouseTable(ti)
             const group = new THREE.Group()
             group.position.set(cx, 0, cz)
 
-            const top = new THREE.Mesh(
-                tableTopGeo,
-                tableMaterial(opts.teamCompeting?.[ti], tableTopColorForCompetition, tableTopMaterials),
-            )
+            const top = new THREE.Mesh(tableTopGeo, tableMaterial(tableTopColorFor(ti), tableTopMaterials))
             top.position.y = 1.5
             top.castShadow = true
             top.receiveShadow = true
             group.add(top)
-            // Exhibition desks keep the same silhouette and lighting, with pale
+            // The house desks keep the same silhouette and lighting, with pale
             // furniture finishes plus a slim teal inlay and matching laptop marks.
-            if (exhibitionDesk) {
+            if (houseDesk) {
                 const inlay = new THREE.Mesh(exhibitionInlayGeo, exhibitionAccentMat)
                 inlay.position.set(0, 1.632, -1.28)
                 group.add(inlay)
             }
             for (const [lx, lz] of [[-2.45, -1.2], [2.45, -1.2], [-2.45, 1.2], [2.45, 1.2]] as const) {
-                const leg = new THREE.Mesh(
-                    tableLegGeo,
-                    tableMaterial(opts.teamCompeting?.[ti], tableLegColorForCompetition, tableLegMaterials, 0.85),
-                )
+                const leg = new THREE.Mesh(tableLegGeo, tableMaterial(tableLegColorFor(ti), tableLegMaterials, 0.85))
                 leg.position.set(lx, 0.72, lz)
                 leg.castShadow = true
                 group.add(leg)
@@ -1446,7 +1419,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     base.position.set(lx!, 1.65, lz!)
                     base.rotation.y = side! > 0 ? 0.35 : Math.PI - 0.35
                     group.add(base)
-                    if (exhibitionDesk) {
+                    if (houseDesk) {
                         const accent = new THREE.Mesh(laptopAccentGeo, exhibitionAccentMat)
                         accent.position.set(0, 0.037, side! * 0.15)
                         base.add(accent)
@@ -1463,33 +1436,12 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             chairAt(group, -3.3, 0, Math.PI / 2)
             chairAt(group, 3.3, 0, -Math.PI / 2)
 
-            // Only a desk with a team is a target: no hitbox means no hover, no
-            // highlight while dragging, and no drop that could not have been saved.
-            if (hasTeam) {
-                const hit = new THREE.Mesh(hitboxGeo, hitboxMat)
-                hit.position.y = 1.3
-                hit.userData.tableIdx = ti
-                group.add(hit)
-                tableHitboxes.push(hit)
-            }
-
-            const baseLabel = opts.teamLabels[ti] ?? EMPTY_TABLE_LABEL
-            const label = tableLabelText(ti, opts.teamLabels, { count: 0, showCount: false })
-            const normal = makeLabelTexture(label, false, !hasTeam)
-            const gold = makeLabelTexture(label, true)
-            const labelMat = track(new THREE.SpriteMaterial({ map: normal, depthTest: true }))
-            const sprite = new THREE.Sprite(labelMat)
-            sprite.scale.set(2.9, 0.8, 1)
-            sprite.position.set(0, AREA_LABEL_Y, 0)
-            group.add(sprite)
-            if (!hasTeam) fadeTable(group)
+            const hit = new THREE.Mesh(hitboxGeo, hitboxMat)
+            hit.position.y = 1.3
+            hit.userData.tableIdx = ti
+            group.add(hit)
+            tableHitboxes.push(hit)
             screenOccluders.push(group)
-            const labelState = { sprite, baseLabel, normal, gold, hasTeam }
-            labelSprites.push(labelState)
-            registerCleanup(() => {
-                labelState.normal.dispose()
-                labelState.gold.dispose()
-            })
 
             scene.add(group)
         })
@@ -1531,11 +1483,11 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const blobGeo = track(new THREE.PlaneGeometry(1.1 * CHARACTER_SCALE, 0.6 * CHARACTER_SCALE))
         const blobMat = track(new THREE.MeshBasicMaterial({ map: contactShadowTex, transparent: true, depthWrite: false, opacity: 0.9 }))
         const haloGeo = track(new THREE.RingGeometry(0.55, 0.82, 24))
-        const makePresenceHalo = (role: RoomRole | undefined) => {
+        const makePresenceHalo = (color: number) => {
             const halo = new THREE.Mesh(
                 haloGeo,
                 track(new THREE.MeshBasicMaterial({
-                    color: roleHaloColor(role),
+                    color,
                     transparent: true,
                     opacity: 0.8,
                     depthWrite: false,
@@ -1549,53 +1501,57 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return halo
         }
 
-        // Decode each distinct generated sheet (data URL) once; a sheet that fails
-        // to decode just leaves its player on the built-in fallback.
+        // Generated and custom sheets (data URLs and URLs), decoded once each; a
+        // sheet that fails to decode leaves its character on the built-in fallback.
         const customTex = new Map<string, THREE.Texture>()
-        await Promise.all(
-            opts.players.map(async (p) => {
-                const r = resolveSprite(p.spriteId, p.spriteSheet, p.playerIdx, p.teamIdx ?? 0)
-                if (r.kind !== "custom" || customTex.has(r.sheetDataUrl)) return
-                try {
-                    customTex.set(r.sheetDataUrl, track(await loadTexture(loader, r.sheetDataUrl)))
-                } catch (err) {
-                    logger.warn("room3d.sprite_decode_failed", err)
-                }
-            }),
-        )
-
-        const chars: CharState[] = opts.players.map((p) => {
-            const resolved = resolveSprite(p.spriteId, p.spriteSheet, p.playerIdx, p.teamIdx ?? 0)
-            const custom = resolved.kind === "custom" ? customTex.get(resolved.sheetDataUrl) : undefined
-
-            // Whether the sheet came from the pipeline or the assets folder no longer
-            // decides how it is drawn — its own dimensions do.
-            let source: THREE.Texture
-            if (custom) {
-                source = custom
-            } else {
-                const sheetIdx =
-                    resolved.kind === "builtin"
-                        ? resolved.charIdx
-                        : characterIdForPlayer(p.playerIdx, p.teamIdx ?? 0)
-                source = charSheets[sheetIdx % charSheets.length]!
+        const loadCustomSheet = async (url: string): Promise<THREE.Texture | null> => {
+            const cached = customTex.get(url)
+            if (cached) return cached
+            try {
+                const texture = track(await loadTexture(loader, url))
+                customTex.set(url, texture)
+                return texture
+            } catch (err) {
+                logger.warn("room3d.sprite_decode_failed", err)
+                return null
             }
-            const img = source.image as HTMLImageElement
+        }
+
+        // The cast is entirely dynamic: agents arrive through upsertAgent and
+        // visitors through upsertGuest, so nothing is baked in at build time and
+        // nobody's arrival rebuilds the WebGL scene.
+        const chars: CharState[] = []
+        const charByPlayerIdx = new Map<number, CharState>()
+
+        /** Build a character from its sheet and put it in the room. */
+        const createCharacter = (input: {
+            playerIdx: number
+            name: string
+            role: RoomRole
+            haloColor: number
+            source: THREE.Texture
+            teamIdx: number | null
+            seatIdx: number
+            x: number
+            z: number
+        }): CharState => {
+            const img = input.source.image as HTMLImageElement
             const format = sheetFormatFor(img.width, img.height)
-            const tex = track(source.clone())
+            const tex = input.source.clone()
             tex.repeat.set(1 / format.cols, 1 / format.rows)
-            const material = track(new THREE.MeshLambertMaterial({ map: tex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide }))
+            const material = new THREE.MeshLambertMaterial({ map: tex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide })
             const mesh = new THREE.Mesh(planeForSheet(format), material)
-            mesh.userData.playerIdx = p.playerIdx
+            mesh.userData.playerIdx = input.playerIdx
             const blob = new THREE.Mesh(blobGeo, blobMat)
             blob.rotation.x = -Math.PI / 2
             blob.position.y = characterShadowLocalY(format)
             mesh.add(blob)
-            const presenceHalo = makePresenceHalo(p.role)
+            const presenceHalo = makePresenceHalo(input.haloColor)
             scene.add(mesh)
-            const wander = seedWander(p.playerIdx, p.teamIdx ?? 0, p.seatIdx)
-            return {
+            const wander = seedWander(input.playerIdx, input.teamIdx ?? 0, input.seatIdx)
+            const c: CharState = {
                 mesh,
+                agent: null,
                 material,
                 texture: tex,
                 format,
@@ -1603,18 +1559,21 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 speed: wander.speed,
                 pauseLeft: wander.pauseLeft,
                 rng: wander.rng,
-                teamIdx: p.teamIdx,
-                playerIdx: p.playerIdx,
-                name: p.name,
-                role: p.role ?? "student",
+                teamIdx: input.teamIdx,
+                playerIdx: input.playerIdx,
+                name: input.name,
+                role: input.role,
                 presenceHalo,
-                x: 0,
-                z: 0,
+                x: input.x,
+                z: input.z,
                 transition: null,
                 net: null,
             }
-        })
-        const charByPlayerIdx = new Map(chars.map((c) => [c.playerIdx, c]))
+            c.mesh.position.set(c.x, characterGroundY(format), c.z)
+            chars.push(c)
+            charByPlayerIdx.set(c.playerIdx, c)
+            return c
+        }
 
         // ------------------------------------------------------------ the snap
         // Who has been dusted (hidden, unpickable, uninteractable) and the fade
@@ -1726,13 +1685,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return { x: toX(pos.x), z: toZ(pos.y), dir: pos.dir }
         }
 
-        const snapToAuthoritativeHome = (c: CharState) => {
-            const home = authoritativePosition(c)
-            c.x = home.x
-            c.z = home.z
-            c.mesh.position.set(c.x, characterGroundY(c.format), c.z)
-        }
-
         // ---------------------------------------------------- multiplayer: local control
 
         // Movement runs in the 2D room plan's px space (where the shared collision
@@ -1825,7 +1777,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return resolveRoomInteract(
                 { x: localPx.x, y: localPx.y, dir: localDir },
                 probeCandidates(),
-                opts.teamLabels.length,
             )
         }
 
@@ -1867,6 +1818,13 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 localInput.releaseMovement()
                 localMoving = false
                 opts.onArcadeInteract?.()
+                return
+            }
+            // An agent answers through the host, not the hub: what a conversation
+            // with one is depends on the app the agents belong to.
+            const target = charByPlayerIdx.get(hit.key)
+            if (target?.agent) {
+                if (!target.agent.leaving) opts.onAgentInteract?.(target.agent.id)
                 return
             }
             opts.onInteract?.(hit.key)
@@ -2039,7 +1997,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             bubble.texture.dispose()
             speechBubbles.delete(playerIdx)
         }
-        const showSpeechFor = (playerIdx: number, text: string) => {
+        const showSpeechFor = (playerIdx: number, text: string, ms = SPEECH_MS) => {
             if (!charByPlayerIdx.has(playerIdx)) return
             clearSpeech(playerIdx)
             const texture = makeSpeechTexture(text)
@@ -2048,7 +2006,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             sprite.scale.set(4.6, 1.34, 1)
             sprite.renderOrder = 22
             scene.add(sprite)
-            speechBubbles.set(playerIdx, { sprite, material, texture, expiresAt: performance.now() + SPEECH_MS })
+            speechBubbles.set(playerIdx, { sprite, material, texture, expiresAt: performance.now() + ms })
         }
         /** A bubble over an interactable object (they share the bubble map — object
          * idxs live far above any playerIdx). Objects don't move, so the bubble is
@@ -2071,12 +2029,34 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             for (const playerIdx of [...speechBubbles.keys()]) clearSpeech(playerIdx)
         })
 
+        /** Take a character out of the room and release what was its own. */
+        const destroyChar = (c: CharState) => {
+            if (localChar === c) releaseLocalControl()
+            clearSpeech(c.playerIdx)
+            snapped.delete(c)
+            scene.remove(c.mesh)
+            scene.remove(c.presenceHalo)
+            // The plane geometry and shadow blob are shared with the whole cast; only
+            // this character's cloned texture and material are its own.
+            c.texture.dispose()
+            c.material.dispose()
+            const at = chars.indexOf(c)
+            if (at >= 0) chars.splice(at, 1)
+            charByPlayerIdx.delete(c.playerIdx)
+            nameTagCache.get(c.playerIdx)?.dispose()
+            nameTagCache.delete(c.playerIdx)
+            if (hoverPlayerIdx === c.playerIdx) setHoveredPlayer(null)
+            if (selectedChar() === c) {
+                selection = null
+                applySelection()
+            }
+        }
+
         // ------------------------------------------------------- multiplayer: guests
 
-        // Visitors (admins, mentors, judges) get transient characters that exist
-        // only while they are connected — created here at runtime, because the
-        // page's own roster has never heard of them and rebuilding the WebGL scene
-        // per join would black-flash the room.
+        // Visitors get transient characters that exist only while they are
+        // connected — created at runtime, because rebuilding the WebGL scene per
+        // join would black-flash the room.
         const guestPlayerIdxs = new Set<number>()
 
         const spawnGuestChar = (guest: {
@@ -2092,17 +2072,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             void (async () => {
                 const resolved = resolveSprite(guest.spriteId, guest.spriteSheet, guest.playerIdx, 0)
                 let source: THREE.Texture | null = null
-                if (resolved.kind === "custom") {
-                    source = customTex.get(resolved.sheetDataUrl) ?? null
-                    if (!source) {
-                        try {
-                            source = await loadTexture(loader, resolved.sheetDataUrl)
-                            customTex.set(resolved.sheetDataUrl, track(source))
-                        } catch (err) {
-                            logger.warn("room3d.guest_decode_failed", err)
-                        }
-                    }
-                }
+                if (resolved.kind === "custom") source = await loadCustomSheet(resolved.sheetDataUrl)
                 if (!source) {
                     const sheetIdx =
                         resolved.kind === "builtin"
@@ -2113,42 +2083,18 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 // Departed (or the scene died) while the sheet was decoding.
                 if (cleanedUp || !guestPlayerIdxs.has(guest.playerIdx) || charByPlayerIdx.has(guest.playerIdx)) return
 
-                const img = source.image as HTMLImageElement
-                const format = sheetFormatFor(img.width, img.height)
-                const tex = source.clone()
-                tex.repeat.set(1 / format.cols, 1 / format.rows)
-                const material = new THREE.MeshLambertMaterial({ map: tex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide })
-                const mesh = new THREE.Mesh(planeForSheet(format), material)
-                mesh.userData.playerIdx = guest.playerIdx
-                const blob = new THREE.Mesh(blobGeo, blobMat)
-                blob.rotation.x = -Math.PI / 2
-                blob.position.y = characterShadowLocalY(format)
-                mesh.add(blob)
-                const presenceHalo = makePresenceHalo(guest.role)
-                scene.add(mesh)
-                const wander = seedWander(guest.playerIdx, 0, 0)
-                const c: CharState = {
-                    mesh,
-                    material,
-                    texture: tex,
-                    format,
-                    phase: wander.phase,
-                    speed: wander.speed,
-                    pauseLeft: wander.pauseLeft,
-                    rng: wander.rng,
-                    teamIdx: null,
+                const role = guest.role ?? "visitor"
+                const c = createCharacter({
                     playerIdx: guest.playerIdx,
                     name: guest.name,
-                    role: guest.role ?? "viewer",
-                    presenceHalo,
+                    role,
+                    haloColor: roleHaloColor(role),
+                    source,
+                    teamIdx: null,
+                    seatIdx: 0,
                     x: guest.start ? toX(guest.start.x) : 0,
                     z: guest.start ? toZ(guest.start.y) : ROOM_D - 2,
-                    transition: null,
-                    net: null,
-                }
-                c.mesh.position.set(c.x, characterGroundY(format), c.z)
-                chars.push(c)
-                charByPlayerIdx.set(guest.playerIdx, c)
+                })
                 if (pendingLocal?.playerIdx === guest.playerIdx) {
                     const start = pendingLocal.start ?? guest.start
                     pendingLocal = null
@@ -2161,29 +2107,172 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             guestPlayerIdxs.delete(playerIdx)
             if (pendingLocal?.playerIdx === playerIdx) pendingLocal = null
             const c = charByPlayerIdx.get(playerIdx)
-            if (!c) return
-            if (localChar === c) releaseLocalControl()
-            clearSpeech(playerIdx)
-            snapped.delete(c)
-            scene.remove(c.mesh)
-            scene.remove(c.presenceHalo)
-            // The plane geometry and shadow blob are shared with the whole cast; only
-            // this character's cloned texture and material are its own.
-            c.texture.dispose()
-            c.material.dispose()
-            const at = chars.indexOf(c)
-            if (at >= 0) chars.splice(at, 1)
-            charByPlayerIdx.delete(playerIdx)
-            if (hoverPlayerIdx === playerIdx) setHoveredPlayer(null)
-            if (selPlayerIdx === playerIdx) {
-                selPlayerIdx = null
-                applySelection()
-            }
+            if (c) destroyChar(c)
         }
         registerCleanup(() => {
             for (const playerIdx of [...guestPlayerIdxs]) removeGuestChar(playerIdx)
         })
 
+        // ------------------------------------------------------------- agents
+
+        let nextAgentIdx = AGENT_IDX_BASE
+        const agentChars = new Map<string, CharState>()
+        /** Agents whose sheet is still decoding, with the latest input to apply
+         * when it lands. */
+        const pendingAgents = new Map<string, RoomAgentInput>()
+        /** Which orbit slots each desk has taken. */
+        const seatsTaken = new Map<number, Set<number>>()
+
+        /** The emptiest desk's lowest free slot, or null once every desk is full. */
+        const allocateSeat = (): { table: number; seat: number } | null => {
+            let best: number | null = null
+            let bestCount = Number.POSITIVE_INFINITY
+            for (const table of AGENT_TABLE_IDXS) {
+                const taken = seatsTaken.get(table)?.size ?? 0
+                if (taken < SEATS_PER_TABLE && taken < bestCount) {
+                    best = table
+                    bestCount = taken
+                }
+            }
+            if (best === null) return null
+            const taken = seatsTaken.get(best) ?? new Set<number>()
+            seatsTaken.set(best, taken)
+            let seat = 0
+            while (taken.has(seat)) seat++
+            taken.add(seat)
+            return { table: best, seat }
+        }
+        const releaseSeat = (seat: { table: number; seat: number }) => {
+            seatsTaken.get(seat.table)?.delete(seat.seat)
+        }
+
+        /** Where a new agent appears: the open aisle south of the desks. */
+        const AISLE_Y = Math.max(...PARTICIPANT_TABLES.map((tbl) => tbl.y + tbl.h)) + 48
+        const aisleSpot = (n: number) =>
+            nearestFreePoint(340 + ((n * 53) % 140), AISLE_Y + ((n * 29) % 36), colliders)
+
+        const cssColor = (css: string): number => new THREE.Color(css).getHex()
+
+        const sourceForAgent = async (agent: RoomAgentInput): Promise<THREE.Texture> => {
+            if (typeof agent.sprite === "string") {
+                const custom = await loadCustomSheet(agent.sprite)
+                if (custom) return custom
+            }
+            const idx = typeof agent.sprite === "number" && Number.isInteger(agent.sprite)
+                ? agent.sprite
+                : hashAgentId(agent.id)
+            return charSheets[((idx % charSheets.length) + charSheets.length) % charSheets.length]!
+        }
+
+        const clearStatusBubble = (c: CharState) => {
+            const bubble = c.agent?.bubble
+            if (!c.agent || !bubble) return
+            scene.remove(bubble.sprite)
+            bubble.material.dispose()
+            bubble.texture.dispose()
+            c.agent.bubble = null
+            c.agent.bubbleText = null
+        }
+
+        /** Give a character the look its agent's status asks for. */
+        const applyAgentLook = (c: CharState, agent: RoomAgentInput) => {
+            const state = c.agent!
+            state.style = agent.style
+            if (c.name !== agent.name) {
+                c.name = agent.name
+                nameTagCache.get(c.playerIdx)?.dispose()
+                nameTagCache.delete(c.playerIdx)
+                if (selectedChar() === c) applySelection()
+            }
+            const halo = agent.color ?? agent.style.halo
+            if (halo) {
+                ;(c.presenceHalo.material as THREE.MeshBasicMaterial).color.setHex(cssColor(halo))
+                c.presenceHalo.visible = !state.leaving
+            } else {
+                c.presenceHalo.visible = false
+            }
+            const text = state.leaving ? null : bubbleTextFor(agent, agent.style)
+            if (text === state.bubbleText) return
+            clearStatusBubble(c)
+            if (!text) return
+            const texture = makeSpeechTexture(text)
+            const material = new THREE.SpriteMaterial({ map: texture, depthTest: false })
+            const sprite = new THREE.Sprite(material)
+            sprite.scale.set(4.6, 1.34, 1)
+            sprite.renderOrder = 22
+            scene.add(sprite)
+            state.bubble = { sprite, material, texture }
+            state.bubbleText = text
+        }
+
+        const upsertAgentChar = (agent: RoomAgentInput) => {
+            const existing = agentChars.get(agent.id)
+            if (existing?.agent) {
+                if (existing.agent.leaving) return
+                applyAgentLook(existing, agent)
+                return
+            }
+            const decoding = pendingAgents.has(agent.id)
+            pendingAgents.set(agent.id, agent)
+            if (decoding) return
+            void (async () => {
+                const source = await sourceForAgent(agent)
+                const latest = pendingAgents.get(agent.id)
+                // Removed (or the scene died) while the sheet was decoding.
+                if (cleanedUp || !latest) return
+                pendingAgents.delete(agent.id)
+                const playerIdx = nextAgentIdx++
+                const seat = allocateSeat()
+                const spawn = aisleSpot(playerIdx - AGENT_IDX_BASE)
+                const c = createCharacter({
+                    playerIdx,
+                    name: latest.name,
+                    role: "visitor",
+                    haloColor: 0x40ff88,
+                    source,
+                    teamIdx: seat?.table ?? null,
+                    seatIdx: seat?.seat ?? 0,
+                    x: toX(spawn.x),
+                    z: toZ(spawn.y),
+                })
+                c.agent = { id: latest.id, style: latest.style, bubbleText: null, bubble: null, seat, leaving: null }
+                agentChars.set(latest.id, c)
+                // Walk in from the aisle to the desk's orbit over a beat.
+                if (seat) c.transition = { fromX: c.x, fromZ: c.z, startedAt: performance.now(), duration: AGENT_WALK_IN_MS }
+                applyAgentLook(c, latest)
+            })()
+        }
+
+        const removeAgentChar = (agentId: string) => {
+            pendingAgents.delete(agentId)
+            const c = agentChars.get(agentId)
+            if (!c?.agent || c.agent.leaving) return
+            c.agent.leaving = { startedAt: performance.now() }
+            // The sprite is cut out with alphaTest, which turns opacity into a
+            // cliff at 0.5; lowering it lets the fade run all the way down.
+            c.material.alphaTest = 0.02
+            c.material.depthWrite = false
+            c.material.needsUpdate = true
+            c.presenceHalo.visible = false
+            clearStatusBubble(c)
+            if (hoverPlayerIdx === c.playerIdx) setHoveredPlayer(null)
+        }
+
+        /** The fade is over: the character leaves the room and frees its seat. */
+        const finishAgentRemoval = (c: CharState) => {
+            const state = c.agent
+            if (!state) return
+            if (state.seat) releaseSeat(state.seat)
+            agentChars.delete(state.id)
+            destroyChar(c)
+        }
+        registerCleanup(() => {
+            pendingAgents.clear()
+            for (const c of [...agentChars.values()]) {
+                clearStatusBubble(c)
+                finishAgentRemoval(c)
+            }
+        })
 
         // selected-player marker (bobbing gold diamond) + name tags
         const marker = new THREE.Mesh(
@@ -2382,7 +2471,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const setHoveredPlayer = (playerIdx: number | null) => {
             if (playerIdx === hoverPlayerIdx) return
             hoverPlayerIdx = playerIdx
-            if (playerIdx !== null && playerIdx !== selPlayerIdx) {
+            if (playerIdx !== null && charByPlayerIdx.get(playerIdx) !== selectedChar()) {
                 const c = charByPlayerIdx.get(playerIdx)
                 if (c) {
                     hoverTagMat.map = nameTagFor(c)
@@ -2404,13 +2493,13 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             raycaster.setFromCamera(pointerNdc, camera)
             const charHits = raycaster.intersectObjects(pickableCharMeshes(), false)
             if (charHits.length > 0) {
-                return { type: "player", idx: charHits[0]!.object.userData.playerIdx as number }
+                return selectionFor(charByPlayerIdx.get(charHits[0]!.object.userData.playerIdx as number))
             }
             // A table that has been stood down for the screen is not standing there to
             // be clicked: its hitbox is still in the list, but nothing is drawn at it.
             const tblHits = occludersHidden ? [] : raycaster.intersectObjects(tableHitboxes, false)
             if (tblHits.length > 0) {
-                return { type: "team", idx: tblHits[0]!.object.userData.tableIdx as number }
+                return { type: "desk", idx: tblHits[0]!.object.userData.tableIdx as number }
             }
             return null
         }
@@ -2428,9 +2517,16 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return raycaster.intersectObject(arcade, true).length > 0
         }
 
-        /** The raycaster does not honour `visible`; a dusted character has to be
-         * left out of the list or the pointer keeps finding a ghost. */
-        const pickableCharMeshes = () => chars.filter((c) => !snapped.has(c)).map((c) => c.mesh)
+        /** The raycaster does not honour `visible`; a dusted (or departing)
+         * character has to be left out of the list or the pointer keeps finding
+         * a ghost. */
+        const pickableCharMeshes = () => chars.filter((c) => !snapped.has(c) && !c.agent?.leaving).map((c) => c.mesh)
+
+        /** What a character is, as a pick: the agent, or the visitor's index. */
+        const selectionFor = (c: CharState | undefined): RoomSelection => {
+            if (!c) return null
+            return c.agent ? { type: "agent", id: c.agent.id } : { type: "player", idx: c.playerIdx }
+        }
 
         const pickCharacterAt = (): CharState | null => {
             raycaster.setFromCamera(pointerNdc, camera)
@@ -2639,20 +2735,21 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
         // ------------------------------------------------------------ selection
 
-        let selTeamIdx: number | null = null
-        let selPlayerIdx: number | null = null
+        let selection: RoomSelection = null
+
+        /** The character the selection points at, if it is one. */
+        const selectedChar = (): CharState | null => {
+            if (!selection) return null
+            if (selection.type === "agent") return agentChars.get(selection.id) ?? null
+            if (selection.type === "player") return charByPlayerIdx.get(selection.idx) ?? null
+            return null
+        }
 
         const applySelection = () => {
-            highlight.visible = selTeamIdx !== null
-            if (selTeamIdx !== null) {
-                const tbl = PARTICIPANT_TABLES[selTeamIdx]
-                if (tbl) highlight.position.set(toX(tbl.x + tbl.w / 2), 0.02, toZ(tbl.y + tbl.h / 2))
-            }
-            labelSprites.forEach((l, i) => {
-                l.sprite.material.map = i === selTeamIdx ? l.gold : l.normal
-                l.sprite.material.needsUpdate = true
-            })
-            const selChar = selPlayerIdx !== null ? charByPlayerIdx.get(selPlayerIdx) ?? null : null
+            const desk = selection?.type === "desk" ? PARTICIPANT_TABLES[selection.idx] : undefined
+            highlight.visible = desk !== undefined
+            if (desk) highlight.position.set(toX(desk.x + desk.w / 2), 0.02, toZ(desk.y + desk.h / 2))
+            const selChar = selectedChar()
             marker.visible = selChar !== null
             selTag.visible = selChar !== null
             if (selChar) {
@@ -2713,6 +2810,8 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             if (localChar) {
                 for (let step = 0; step < advance.steps; step++) stepLocalControl()
             }
+            /** Agents whose fade-out finished this frame; removed after the loop. */
+            const departed: CharState[] = []
             for (const c of chars) {
                 const isLocal = c === localChar
                 let dir: WalkDir
@@ -2744,7 +2843,11 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     dir = c.net.dir
                     standing = !c.net.moving
                 } else {
-                    if (c.teamIdx !== null) {
+                    // An agent walks laps only while its status says so; standing
+                    // still it holds its place on the orbit, marching on the spot.
+                    const style = c.agent?.style ?? null
+                    const laps = c.teamIdx !== null && (style === null || style.motion === "laps")
+                    if (laps) {
                         for (let step = 0; step < advance.steps; step++) stepWander(c)
                     }
                     const home = authoritativePosition(c)
@@ -2762,20 +2865,36 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     }
                     c.mesh.position.set(c.x, y, c.z)
                     dir = home.dir
-                    standing = c.teamIdx === null || c.pauseLeft > 0
+                    standing = style
+                        ? (c.transition === null && laps && c.pauseLeft > 0)
+                        : (c.teamIdx === null || c.pauseLeft > 0)
                 }
                 const row = c.format.dirRow[dir]
-                const animFrame = standing ? c.format.standFrame : c.format.walkFrame(walkFrame)
+                let animFrame = standing ? c.format.standFrame : c.format.walkFrame(walkFrame)
+                if (c.agent && c.agent.style.frame === "hurt" && c.transition === null) animFrame = HURT_FRAME
                 c.texture.offset.set(animFrame / c.format.cols, 1 - (row + 1) / c.format.rows)
-                const dim = selTeamIdx !== null && c.teamIdx !== selTeamIdx
+                const dim = selection?.type === "desk" && c.teamIdx !== selection.idx
                 c.material.color.setHex(dim ? 0x3c4256 : 0xffffff)
                 // Keep opacity above alphaTest (0.5) so dimmed sprites stay visible.
-                c.material.opacity = dim ? 0.65 : 1
+                let opacity = dim ? 0.65 : 1
+                if (c.agent) {
+                    opacity *= c.agent.style.opacity
+                    if (c.agent.leaving) {
+                        const progress = Math.min(1, (now - c.agent.leaving.startedAt) / AGENT_FADE_OUT_MS)
+                        opacity *= 1 - progress
+                        if (progress >= 1) departed.push(c)
+                    }
+                    if (c.agent.style.pulse) {
+                        ;(c.presenceHalo.material as THREE.MeshBasicMaterial).opacity = 0.55 + Math.sin(t * 4) * 0.3
+                    }
+                }
+                c.material.opacity = opacity
                 // Keep the halo in world space, centred on the character's ground
                 // position. Attaching it to the billboard makes it inherit sprite-facing
                 // transforms and can pull the projected ring away from the feet.
                 c.presenceHalo.position.set(c.x, 0.03, c.z)
             }
+            for (const c of departed) finishAgentRemoval(c)
             // The snap's fade overrides the opacity and height just set.
             stepSnap(frameMs)
 
@@ -2825,6 +2944,14 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 }
             }
 
+            // status bubbles follow their agents; a spoken line takes their place
+            for (const c of chars) {
+                const bubble = c.agent?.bubble
+                if (!bubble) continue
+                bubble.sprite.visible = c.mesh.visible && !speechBubbles.has(c.playerIdx)
+                bubble.sprite.position.set(c.x, characterTopY(c.format) + SPEECH_RISE, c.z)
+            }
+
             // speech bubbles follow their speakers, then expire
             if (speechBubbles.size > 0) {
                 const nowMs = performance.now()
@@ -2841,8 +2968,8 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
 
             // selection marker + tag follow their character
-            if (selPlayerIdx !== null) {
-                const c = charByPlayerIdx.get(selPlayerIdx)
+            {
+                const c = selectedChar()
                 if (c) {
                     const top = characterTopY(c.format)
                     marker.position.set(c.x, top + MARKER_RISE + Math.sin(t * 4) * 0.14, c.z)
@@ -3026,10 +3153,19 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 camera.updateProjectionMatrix()
                 if (screenFocusT > 0) syncCamera()
             },
-            setSelection(teamIdx, playerIdx) {
-                selTeamIdx = teamIdx
-                selPlayerIdx = playerIdx
+            setSelection(next) {
+                selection = next
                 applySelection()
+            },
+            upsertAgent(agent) {
+                upsertAgentChar(agent)
+            },
+            removeAgent(agentId) {
+                removeAgentChar(agentId)
+            },
+            say(agentId, text, ms) {
+                const c = agentChars.get(agentId)
+                if (c) showSpeechFor(c.playerIdx, text, ms)
             },
             setMoveInput(direction, active) {
                 // Releases always land (a hold must never stick past losing control);
@@ -3094,25 +3230,15 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 const centre = groundAt(rect.left + rect.width / 2, rect.top + rect.height / 2, interactProbe)
                 if (!centre) return null
                 return pickNearestToPoint({ x: centre.x, z: centre.z }, {
-                    chars: chars.map((c) => ({ playerIdx: c.playerIdx, x: c.x, z: c.z })),
-                    tables: PARTICIPANT_TABLES.map((tbl, teamIdx) => ({
-                        teamIdx,
+                    chars: chars
+                        .filter((c) => !snapped.has(c) && !c.agent?.leaving)
+                        .map((c) => ({ selection: selectionFor(c), x: c.x, z: c.z })),
+                    tables: PARTICIPANT_TABLES.map((tbl, tableIdx) => ({
+                        tableIdx,
                         x: toX(tbl.x + tbl.w / 2),
                         z: toZ(tbl.y + tbl.h / 2),
                     })),
                 })
-            },
-            setPlayerTeam(playerIdx, teamIdx, animate = false) {
-                const c = charByPlayerIdx.get(playerIdx)
-                if (!c || c.teamIdx === teamIdx) return
-                const fromX = c.x
-                const fromZ = c.z
-                c.teamIdx = teamIdx
-                c.transition = animate
-                    ? { fromX, fromZ, startedAt: performance.now(), duration: 520 }
-                    : null
-                if (!animate) snapToAuthoritativeHome(c)
-                applySelection()
             },
             setNetStates(states) {
                 for (const s of states) {

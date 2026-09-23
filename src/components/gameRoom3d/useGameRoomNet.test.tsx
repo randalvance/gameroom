@@ -4,7 +4,6 @@
 import { act, render } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { HelloEvent } from "~/lib/gameRoomNet/protocol"
-import { buildAllPlayers } from "~/lib/event-types"
 import type { RoomSceneHandle } from "./scene"
 
 class FakeEventSource {
@@ -58,7 +57,7 @@ const hello = (over: Partial<HelloEvent> = {}): HelloEvent => ({
 let net: ReturnType<typeof useGameRoomNet>
 
 function Probe() {
-  net = useGameRoomNet([])
+  net = useGameRoomNet()
   return null
 }
 
@@ -159,26 +158,14 @@ describe("a bulletin pushed straight at the room", () => {
 })
 
 describe("idle characters' wander state", () => {
-  const ROSTER = buildAllPlayers([
-    {
-      id: "team-a",
-      name: "TEAM 01",
-      players: [
-        { id: "user-ada", name: "Ada", spriteId: null, spriteSheet: null },
-        { id: "user-bob", name: "Bob", spriteId: null, spriteSheet: null },
-      ],
-    },
-  ])
+  // Visitors are the only characters this room draws from the hub; they
+  // carry their hub idx as their player index.
   const roster = [
-    { idx: 0, id: "user-ada", name: "Ada", team: "TEAM 01" },
-    { idx: 1, id: "user-bob", name: "Bob", team: "TEAM 01" },
+    { idx: 0, id: "user-ada", name: "Ada", team: "", guest: true, role: "visitor" as const },
+    { idx: 1, id: "user-bob", name: "Bob", team: "", guest: true, role: "visitor" as const },
   ]
   const bobWander = [1, 12.5, 0.224, 0, 99] as const
 
-  function RosterProbe() {
-    net = useGameRoomNet(ROSTER)
-    return null
-  }
   const makeHandle = () => ({
     setWanderStates: vi.fn(),
     setNetStates: vi.fn(),
@@ -188,24 +175,29 @@ describe("idle characters' wander state", () => {
   })
 
   it("lists the connected guests by the player index it minted for them", () => {
-    // A guest's pets are seated by this list (room-pets), so the room can
-    // draw a mentor's or a judge's pets on every client, not only their own.
-    render(<RosterProbe />)
-    feed().emit("hello", hello({ roster: [...roster, { idx: 5, id: "user-mentor", name: "Mentor", team: "", guest: true, role: "mentor" }] }))
-    expect(net.guests).toEqual([{ id: "user-mentor", playerIdx: ROSTER.length + 5 }])
-
-    feed().emit("join", { idx: 6, id: "user-judge", name: "Judge", team: "", guest: true, role: "judge" })
+    render(<Probe />)
+    feed().emit("hello", hello({ roster: [...roster, { idx: 5, id: "user-host", name: "Host", team: "", guest: true, role: "host" as const }] }))
     expect(net.guests).toEqual([
-      { id: "user-mentor", playerIdx: ROSTER.length + 5 },
-      { id: "user-judge", playerIdx: ROSTER.length + 6 },
+      { id: "user-ada", playerIdx: 0 },
+      { id: "user-bob", playerIdx: 1 },
+      { id: "user-host", playerIdx: 5 },
     ])
 
+    feed().emit("join", { idx: 6, id: "user-screen", name: "Screen", team: "", guest: true, role: "screen" })
+    expect(net.guests.map((guest) => guest.id)).toEqual(["user-ada", "user-bob", "user-host", "user-screen"])
+
     feed().emit("leave", { idx: 5, guest: true })
-    expect(net.guests).toEqual([{ id: "user-judge", playerIdx: ROSTER.length + 6 }])
+    expect(net.guests.map((guest) => guest.id)).toEqual(["user-ada", "user-bob", "user-screen"])
+  })
+
+  it("ignores a roster member the hub still seats: only visitors are drawn here", () => {
+    render(<Probe />)
+    feed().emit("hello", hello({ roster: [{ idx: 0, id: "user-ada", name: "Ada", team: "TEAM 01" }] }))
+    expect(net.guests).toEqual([])
   })
 
   it("hands the scene the wanderers hello carries, by this page's player index", () => {
-    render(<RosterProbe />)
+    render(<Probe />)
     const handle = makeHandle()
     act(() => net.onSceneReady(handle as never))
     feed().emit("hello", hello({ you: 0, roster, states: [[0, 100, 100, 2, 2]], wanders: [[...bobWander]] }))
@@ -215,7 +207,7 @@ describe("idle characters' wander state", () => {
   })
 
   it("passes a wander frame straight through", () => {
-    render(<RosterProbe />)
+    render(<Probe />)
     const handle = makeHandle()
     act(() => net.onSceneReady(handle as never))
     feed().emit("hello", hello({ you: 0, roster, states: [[0, 100, 100, 2, 2]] }))
@@ -226,7 +218,7 @@ describe("idle characters' wander state", () => {
   })
 
   it("never hands over this client's own character", () => {
-    render(<RosterProbe />)
+    render(<Probe />)
     const handle = makeHandle()
     act(() => net.onSceneReady(handle as never))
     feed().emit("hello", hello({ you: 1, roster, states: [[1, 100, 100, 2, 2]] }))
@@ -235,7 +227,7 @@ describe("idle characters' wander state", () => {
   })
 
   it("gives a scene that mounts after the frames the latest state it missed", () => {
-    render(<RosterProbe />)
+    render(<Probe />)
     feed().emit("hello", hello({ you: 0, roster, states: [[0, 100, 100, 2, 2]], wanders: [[...bobWander]] }))
     feed().emit("wander", { wanders: [[1, 55, 0.224, 0, 8]] })
     const handle = makeHandle()
@@ -246,7 +238,7 @@ describe("idle characters' wander state", () => {
   })
 
   it("forgets a wanderer's state once a snapshot streams the character again", () => {
-    render(<RosterProbe />)
+    render(<Probe />)
     feed().emit("hello", hello({ you: 0, roster, states: [[0, 100, 100, 2, 2]], wanders: [[...bobWander]] }))
     feed().emit("snapshot", { states: [[0, 100, 100, 2, 2], [1, 200, 200, 1, 3]] })
     const handle = makeHandle()

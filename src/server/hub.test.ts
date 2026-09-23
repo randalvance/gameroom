@@ -86,7 +86,7 @@ function makeSink() {
 }
 
 const GUESTS: Record<string, GuestUser> = {
-  "user-admin": { id: "user-admin", name: "Randal Cunanan", role: "admin", spriteId: 3, spriteSheet: null },
+  "user-admin": { id: "user-admin", name: "Randal Cunanan", role: "host", spriteId: 3, spriteSheet: null },
 }
 
 function makeHub(start = 1_000_000, opts: { teams?: TeamDTO[] } = {}) {
@@ -130,9 +130,9 @@ describe("subscribe", () => {
     const hello = sink.frames[0]!.data as HelloEvent
     expect(hello.you).toBe(1) // flatten order: ada, bob, cyn
     expect(hello.roster).toEqual([
-      { idx: 0, id: "user-ada", name: "Ada Lovelace", team: "TEAM 01", role: "student" },
-      { idx: 1, id: "user-bob", name: "Bob Tan", team: "TEAM 01", role: "student" },
-      { idx: 2, id: "user-cyn", name: "Cynthia Lee", team: "TEAM 02", role: "student" },
+      { idx: 0, id: "user-ada", name: "Ada Lovelace", team: "TEAM 01", role: "visitor" },
+      { idx: 1, id: "user-bob", name: "Bob Tan", team: "TEAM 01", role: "visitor" },
+      { idx: 2, id: "user-cyn", name: "Cynthia Lee", team: "TEAM 02", role: "visitor" },
     ])
     // Only the characters being controlled are streamed — here, just Bob.
     // The rest arrive as the wander state to run them from.
@@ -636,7 +636,7 @@ describe("guests", () => {
     const hello = admin.frames[0]!.data as HelloEvent
     expect(hello.you).toBe(3) // appended after the 3 roster members
     const entry = hello.roster.find((r) => r.id === "user-admin")
-    expect(entry).toMatchObject({ guest: true, name: "Randal Cunanan", role: "admin", spriteId: 3 })
+    expect(entry).toMatchObject({ guest: true, name: "Randal Cunanan", role: "host", spriteId: 3 })
     const you = statesOf(admin.frames[0]!).find((s) => s.idx === 3)!
     expect(you.live).toBe(true)
     expect({ x: you.x, y: you.y }).toEqual(guestSpawnPoint(3))
@@ -644,7 +644,7 @@ describe("guests", () => {
 
     // the student's client got a join carrying everything needed to draw them
     const join = student.frames.find((f) => f.event === "join" && (f.data as { idx: number }).idx === 3)
-    expect(join?.data).toMatchObject({ guest: true, name: "Randal Cunanan", role: "admin" })
+    expect(join?.data).toMatchObject({ guest: true, name: "Randal Cunanan", role: "host" })
   })
 
   it("the guest character disappears on disconnect and revives on return", async () => {
@@ -686,7 +686,7 @@ describe("guests", () => {
     advance(60_000)
     hub.handleInput("user-ada", { x: spawn.x + 15, y: spawn.y, dir: 3, moving: false })
     const result = hub.handleInteract("user-ada", 3)
-    expect(result).toMatchObject({ ok: true, text: "Hi, I'm Randal! I'm an admin here." })
+    expect(result).toMatchObject({ ok: true, text: "Hi, I'm Randal! I'm a host here." })
   })
 })
 
@@ -941,7 +941,7 @@ describe("roster changes", () => {
       { ...TEAMS[1]!, players: [...TEAMS[1]!.players, { id: "user-dee", name: "Dee Ng", spriteId: null, spriteSheet: null }] },
     ]
     const { hub, guests, roster, advance } = makeHub(START, { teams: withoutDee })
-    guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "student", spriteId: null, spriteSheet: null }
+    guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "visitor", spriteId: null, spriteSheet: null }
     await hub.subscribe("user-ada", makeSink().send)
 
     // Seated by the host just before Dee connects — but inside the reload

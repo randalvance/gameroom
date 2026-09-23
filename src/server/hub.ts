@@ -277,7 +277,7 @@ export class GameRoomHub {
         wander,
         lastInputAt: 0,
         guest: false,
-        role: p.role ?? "student",
+        role: p.role ?? "visitor",
         departed: false,
         spriteId: p.spriteId,
         spriteSheet: p.spriteSheet,

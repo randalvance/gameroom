@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { tableInteractAction } from "./table-interact-action"
+import { HOUSE_TABLE_IDXS } from "~/components/gameRoom/constants"
+import { deskInteractAction } from "./table-interact-action"
 
-describe("tableInteractAction", () => {
-  const teams = [{ competing: true }, { competing: false }, {}]
-  it("opens the duel only at an explicitly non-competing desk", () => {
-    expect(tableInteractAction(teams, 0)).toBe("menu")
-    expect(tableInteractAction(teams, 1)).toBe("duel")
-    expect(tableInteractAction(teams, 2)).toBe("menu")
-    expect(tableInteractAction(teams, 7)).toBe("menu")
+describe("deskInteractAction", () => {
+  it("opens the duel only at a house desk", () => {
+    for (const idx of HOUSE_TABLE_IDXS) expect(deskInteractAction(idx)).toBe("duel")
+    expect(deskInteractAction(0)).toBe("menu")
+    expect(deskInteractAction(7)).toBe("menu")
   })
 })

@@ -43,7 +43,7 @@ import {
   SPRITE_SHEET_W,
   WALK_FRAME_SEQUENCE,
 } from "~/lib/sprite-gen"
-import { CUSTOM_SPRITE_ID, SHARED_SPRITE_BASE, SHARED_SPRITE_MAX } from "~/lib/roster"
+import { CUSTOM_SPRITE_ID, SHARED_SPRITE_BASE, SHARED_SPRITE_MAX } from "~/lib/sprites"
 import { DIR_ROW, resolveSprite, sheetFormatFor, walkFrameFor } from "./spriteIndex"
 
 const SHEET = "data:image/png;base64,iVBORw0KGgo="

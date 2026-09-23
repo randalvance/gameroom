@@ -1,22 +1,24 @@
 // 3D game room — HD-2D diorama view. Rendering is delegated to
 // gameRoom3d/scene.ts (three.js, lazy-loaded).
-import { useEffect, useMemo, useRef, useState } from "react"
-import type { FlatPlayer, TeamDTO } from "~/lib/event-types"
+import { useEffect, useRef, useState } from "react"
+import type { Agent, StatusStyleOverrides } from "~/lib/agents"
 import { CW } from "../gameRoom/constants"
-import { RoomInfoPanel, type RoomSelection } from "../gameRoom/InfoPanel"
+import { RoomInfoPanel } from "../gameRoom/InfoPanel"
 import { Room3DViewport } from "./Room3DViewport"
 import type { TouchPadPress } from "./TouchControls"
-import type { RoomPlayerInput, RoomSceneHandle, RoomSelfState } from "./scene"
+import type { RoomSceneHandle, RoomSelfState } from "./scene"
+import { sameSelection, type RoomSelection } from "./selection"
 import type { RoomBoard } from "./wall"
 
 export interface GameRoom3DProps {
-  teams: TeamDTO[]
-  allPlayers: FlatPlayer[]
-  selectedTeamIdx?: number | null
-  selectedPlayerIdx?: number | null
+  agents: readonly Agent[]
+  statusStyles?: StatusStyleOverrides
+  /** A selection driven from outside (the find box). Undefined leaves the
+   * room's own clicks in charge. */
+  selected?: RoomSelection
   /** Fill the parent element edge to edge instead of the framed aspect box. */
   fill?: boolean
-  onPlayerSelect?: (playerIdx: number | null) => void
+  onSelect?: (selection: RoomSelection) => void
   /** The wall's resting page, or null for the room's title alone. */
   board?: RoomBoard | null
   /** A bulletin taking over the wall, or null while it shows the board. */
@@ -49,6 +51,7 @@ export interface GameRoom3DProps {
   onSceneReady?: (handle: RoomSceneHandle | null) => void
   onSelfState?: (state: RoomSelfState) => void
   onInteract?: (targetPlayerIdx: number) => void
+  onAgentInteract?: (agentId: string) => void
   onTableInteract?: (tableIdx: number) => void
   /** Interact fired while facing Primey — local only. */
   onPrimeyInteract?: () => void
@@ -56,12 +59,11 @@ export interface GameRoom3DProps {
 }
 
 export default function GameRoom3D({
-  teams,
-  allPlayers,
-  selectedTeamIdx,
-  selectedPlayerIdx,
+  agents,
+  statusStyles,
+  selected: selectedProp,
   fill = false,
-  onPlayerSelect,
+  onSelect,
   board = null,
   bulletin = null,
   localControlActive = false,
@@ -79,6 +81,7 @@ export default function GameRoom3D({
   onSceneReady,
   onSelfState,
   onInteract,
+  onAgentInteract,
   onTableInteract,
   onPrimeyInteract,
   onMenuToggle,
@@ -95,9 +98,9 @@ export default function GameRoom3D({
 
   // external selection (the find box) drives internal state
   useEffect(() => {
-    if (selectedPlayerIdx === undefined) return
-    setSelected(selectedPlayerIdx === null ? null : { type: "player", idx: selectedPlayerIdx })
-  }, [selectedPlayerIdx])
+    if (selectedProp === undefined) return
+    setSelected(selectedProp)
+  }, [selectedProp])
 
   // The room is the page's main surface — pan keys should work on arrival,
   // not after a click the user has no reason to make.
@@ -105,29 +108,13 @@ export default function GameRoom3D({
     if (fill) focusOriginRef.current?.focus()
   }, [fill])
 
-  const effTeamIdx = selectedTeamIdx ?? (selected?.type === "team" ? selected.idx : null)
-  const effPlayerIdx = selected?.type === "player" ? selected.idx : null
-  const players = useMemo(() => allPlayers.map((player, playerIdx) => ({
-    name: player.name,
-    role: player.role,
-    teamIdx: player.teamIdx,
-    seatIdx: player.seatIdx,
-    playerIdx,
-    spriteId: player.spriteId,
-    spriteSheet: player.spriteSheet,
-  } satisfies RoomPlayerInput)), [allPlayers])
-  const teamLabels = useMemo(() => teams.map((team) => team.name), [teams])
-  const teamCompeting = useMemo(() => teams.map((team) => team.competing ?? true), [teams])
-
   const handlePick = (pick: RoomSelection) => {
-    // Guest characters (connected visitors) live past the page roster's
-    // indices and have no info panel — clicking one is a no-op.
-    if (pick?.type === "player" && !allPlayers[pick.idx]) return
+    // A visitor's character has no card — clicking one is a no-op.
+    if (pick?.type === "player") return
     const previous = selectedRef.current
-    let next: RoomSelection = pick
-    if (pick && previous && pick.type === previous.type && pick.idx === previous.idx) next = null
+    const next: RoomSelection = sameSelection(pick, previous) ? null : pick
     setSelected(next)
-    onPlayerSelect?.(next?.type === "player" ? next.idx : null)
+    onSelect?.(next)
   }
 
   return (
@@ -145,11 +132,9 @@ export default function GameRoom3D({
         style={fill ? { width: "100%", height: "100%" } : undefined}
       >
         <Room3DViewport
-          players={players}
-          teamLabels={teamLabels}
-          teamCompeting={teamCompeting}
-          selectedTeamIdx={effTeamIdx}
-          selectedPlayerIdx={effPlayerIdx}
+          agents={agents}
+          statusStyles={statusStyles}
+          selected={selected}
           cameraControls
           suppressPanKeys={localControlActive}
           localInputDisabled={localInputDisabled}
@@ -172,6 +157,7 @@ export default function GameRoom3D({
           onSceneReady={onSceneReady}
           onSelfState={onSelfState}
           onInteract={onInteract}
+          onAgentInteract={onAgentInteract}
           onTableInteract={onTableInteract}
           onPrimeyInteract={onPrimeyInteract}
           onMenuToggle={onMenuToggle}
@@ -179,9 +165,9 @@ export default function GameRoom3D({
       </div>
       <RoomInfoPanel
         selected={selected}
-        teams={teams}
-        allPlayers={allPlayers}
-        onClose={() => { setSelected(null); onPlayerSelect?.(null) }}
+        agents={agents}
+        statusStyles={statusStyles}
+        onClose={() => { setSelected(null); onSelect?.(null) }}
       />
     </div>
   )

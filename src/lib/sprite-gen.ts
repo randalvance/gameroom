@@ -1,7 +1,6 @@
-// Client-safe half of sprite generation: the sheet contract, the DTO shapes
-// the server functions return, and the pure pixel utilities (chroma key, PNG
-// header checks) shared by the browser processing step and the server-side
-// assign validation. No @c2i/db imports here — same split as lib/roster.ts.
+// The sheet contract, and the pure pixel utilities (chroma key, PNG header
+// checks) a host with its own character generator can lean on. Client-safe:
+// no server imports.
 
 // ---------------------------------------------------------------------------
 // Sheet contract
@@ -9,13 +8,13 @@
 // A generated sheet is a 6×4 grid: the four ROWS are facing directions (down,
 // left, right, up), the six COLUMNS are poses — 0,1,2 are the walk steps, 3
 // and 4 are the two attack frames, 5 is the hurt frame. Cells are 32 wide and
-// 48 tall, so a finished sheet is exactly 192×192. The ComfyUI output arrives
-// at 768×768 (each art pixel a 4×4 block) on a flat background; the browser
-// downsamples and keys it out before the sheet is ever stored.
+// 48 tall, so a finished sheet is exactly 192×192. A generator's raw output
+// may arrive at 768×768 (each art pixel a 4×4 block) on a flat background;
+// the browser downsamples and keys it out before the sheet is ever stored.
 //
 // This layout replaced a 4×4 / 32×32 / 128×128 one, and replaced it OUTRIGHT:
 // there is exactly one sheet format now, and every sheet — shipped stock art,
-// freshly generated, or already sitting in users.sprite_sheet — is read as
+// freshly generated, or stored by a host — is read as
 // this one. A sheet still in the old layout is not detected and gracefully
 // handled; it renders visibly wrong, which is the intended signal that it
 // needs converting. (Deliberate — see the note on sheetFormatFor.)
@@ -47,174 +46,7 @@ export function isSupportedSheetSize(width: number, height: number): boolean {
 // refreshes) observes completion by polling spriteJobStatusFn. One job per
 // user at a time.
 
-export type SpriteJobKind = "base" | "sheet"
-
-export type StartJobResult =
-  /** remaining = generations left in the caller's budget; null = unlimited. */
-  | { ok: true; jobId: string; remaining: number | null }
-  | {
-      ok: false
-      reason:
-        /** The Haiku gate judged the prompt to not describe a drawable character. */
-        | "prompt-rejected"
-        /** The vision gate judged the image unsuitable or not a humanoid character. */
-        | "image-rejected"
-        /** The caller has spent their whole generation budget. */
-        | "limit-reached"
-        /** The caller's one job slot is occupied — poll it instead. */
-        | "busy"
-        /** Too many generations in flight event-wide — costs no budget. */
-        | "queue-full"
-        | "not-configured"
-        | "upstream"
-      message: string
-    }
-
-// ---------------------------------------------------------------------------
-// Queue arithmetic, shared so the modal and /character compute the same ETA
-// the server reasons with. Constants from measuring the live account
-// (2026-08-15): jobs run CONCURRENTLY (3 submitted together all overlapped;
-// wait ~2s at that depth), and a realistic uncached job executes in ~10-20s.
-// ---------------------------------------------------------------------------
-
-/** Conservative per-job wall time, seconds. */
-export const QUEUE_SECONDS_PER_JOB = 20
-/** Concurrency the account demonstrably sustains — used only for ETA math. */
-export const QUEUE_ASSUMED_CONCURRENCY = 3
-
-/** Rough seconds until a job with `ahead` jobs in front of it finishes. */
-export function queueEtaSeconds(ahead: number): number {
-  return (Math.floor(Math.max(0, ahead) / QUEUE_ASSUMED_CONCURRENCY) + 1) * QUEUE_SECONDS_PER_JOB
-}
-
-/** Event-wide generation load, for the "maybe just skip" nudge. */
-export interface QueueDepthView {
-  /** Generations currently in flight across all students. */
-  inFlight: number
-  /** Rough seconds a NEW job would take end-to-end right now. */
-  etaSeconds: number
-}
-
-// ---------------------------------------------------------------------------
-// Admin job tracking (/admin/sprite-jobs) — one row per sprite_generations
-// entry, newest first, with the account resolved to something readable.
-// ---------------------------------------------------------------------------
-
-export interface AdminSpriteJobRow {
-  id: number
-  /** Mirrored display name, else username, else the raw user id. */
-  user: string
-  kind: "base" | "sheet"
-  status: "running" | "done" | "failed"
-  /** Comfy prompt id — or "upload-…" for a base image the student uploaded. */
-  jobId: string
-  startedAt: string
-  /** null while running, and for rows that never recorded an outcome. */
-  completedAt: string | null
-  /** Authenticated asset-proxy URL for the archived output, when one exists. */
-  outputUrl: string | null
-}
-
-export interface AdminSpriteJobsView {
-  jobs: AdminSpriteJobRow[]
-  /** In-flight now (the admission-control count) vs the cap it refuses at. */
-  inFlight: number
-  cap: number
-  /** Totals over the listed window, so the summary matches the table. */
-  done: number
-  failed: number
-  /** The server's clock when this was read. A running job's duration is
-   * rendered from it on BOTH the server and the hydrating browser, so the two
-   * agree; the browser's own clock only takes over after mount. */
-  serverNowMs: number
-}
-
-/** A completed base-image + sprite-sheet pair from the caller's history —
- * what the "previous generations" strip lists and the profile page will show
- * side by side. URLs point at the authenticated asset proxy
- * (/api/sprite-assets/$id); sheetUrl is the RAW archived sheet, so a caller
- * re-selecting it keys the background out in the browser exactly like a
- * fresh generation. */
-export interface GenerationPairView {
-  sheetGenerationId: number
-  /** Comfy job id of the sheet generation. */
-  jobId: string
-  createdAt: string
-  sheetUrl: string
-  /** Full base image (generated or uploaded); null if its asset never archived. */
-  baseUrl: string | null
-  /** Comfy job id of that base — carried so re-selecting a pair can record a
-   * draft that resumes with BOTH halves, not just the sheet. */
-  baseJobId: string | null
-}
-
-/** What the caller's job slot holds right now. "done" is delivered exactly
- * once — the poll that sees completion consumes the slot. */
-export type SpriteJobView =
-  | { state: "none" }
-  | {
-      state: "running"
-      kind: SpriteJobKind
-      jobId: string
-      /** True while the job is WAITING for a slot; false once it is actually
-       * being drawn. The UI says different things for the two — "3 ahead of
-       * you" is reassuring, "drawing" is progress, and one spinner for both
-       * is what makes people give up. */
-      queued: boolean
-      /** In-flight jobs submitted before this one, event-wide; undefined when
-       * the count could not be read (never blocks the poll). */
-      queuedAhead?: number
-    }
-  | { state: "done"; kind: SpriteJobKind; jobId: string; imageDataUrl: string }
-  | { state: "failed"; kind: SpriteJobKind; jobId: string; message: string }
-
-// ---------------------------------------------------------------------------
-// Wizard draft — what the dialog was in the middle of.
-//
-// users.sprite_job only survives a RUNNING job, so a confirmed base image
-// lived in React state alone: closing the dialog threw it away and cost a
-// budget unit to redo. The draft persists the STEP and the ids of whatever
-// has been produced so far; the images themselves are rehydrated from the
-// archived assets, so this stays tiny and never holds a data URL.
-// ---------------------------------------------------------------------------
-
-export type SpriteStep = "prompt" | "base" | "sheet"
-
-/** What the client asks to have remembered. Ids, not images. */
-export interface SpriteDraftInput {
-  step: SpriteStep
-  prompt: string
-  baseJobId: string | null
-  sheetJobId: string | null
-}
-
-/** What comes back, with the archived images resolved to proxy URLs. */
-export interface SpriteDraftView extends SpriteDraftInput {
-  /** Full base image for the confirm step; null if it was never archived. */
-  baseImageUrl: string | null
-  /** RAW (un-keyed) sheet — the client keys it exactly like a fresh one. */
-  sheetImageUrl: string | null
-}
-
 export type SpriteWriteResult = { ok: true } | { ok: false; message: string }
-
-/** Everything the profile page renders: who you are, and the character you
- * play as. `baseImageUrl` is the FULL image the walk cycle was drawn from —
- * null whenever no owned generation backs the current sheet (a built-in
- * sprite, an admin-assigned sheet, or a sheet stored before users.
- * sprite_generation_id existed), in which case the walk cycle is all there
- * is to show. */
-export interface MyCharacterProfile {
-  /** Mirrored Clerk name, else the username; null if neither is set. */
-  name: string | null
-  spriteId: number | null
-  spriteSheet: string | null
-  baseImageUrl: string | null
-}
-
-// Client-side input caps, mirrored by the server-side validators.
-export const PROMPT_MAX = 300
-export const UPLOAD_MAX_BYTES = 4 * 1024 * 1024
 
 // ---------------------------------------------------------------------------
 // Pure pixel utilities

@@ -80,7 +80,6 @@ describe("PRIMEY_POINT", () => {
         ...ROOM_OBJECTS.map((obj, i) => ({ key: OBJECT_IDX_BASE + i, x: obj.x, y: obj.y })),
         { key: PRIMEY_IDX, x: PRIMEY_POINT.x, y: PRIMEY_POINT.y },
       ],
-      PARTICIPANT_TABLES.length,
     )
     expect(target).toEqual({ kind: "probe", key: PRIMEY_IDX })
   })

@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from "react"
 import { GameRoomControlPanel } from "~/components/gamemasterConsole/GameRoomControlPanel"
-import type { TeamDTO } from "~/lib/event-types"
+import type { Agent } from "~/lib/agents"
 
 interface Toast {
   id: number
@@ -19,7 +19,7 @@ interface Toast {
 /** How long a toast stays up. Long enough to read a refusal. */
 const TOAST_MS = 6000
 
-export function Console({ teams, onBack }: { teams: TeamDTO[]; onBack: () => void }) {
+export function Console({ agents, onBack }: { agents: readonly Agent[]; onBack: () => void }) {
   const [toasts, setToasts] = useState<Toast[]>([])
 
   useEffect(() => {
@@ -68,7 +68,7 @@ export function Console({ teams, onBack }: { teams: TeamDTO[]; onBack: () => voi
           GAMEMASTER · GAME ROOM
         </h1>
         <span style={{ color: "#5D6699", fontSize: 14 }}>
-          {teams.length} desks seated · drives every screen in the room
+          {agents.length} agents in the room · drives every screen in it
         </span>
       </header>
 

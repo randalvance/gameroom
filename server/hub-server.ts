@@ -18,19 +18,18 @@ import { getGameRoomHub, setGameRoomRoster, type GuestUser } from "../src/server
 import { parseChat, parseInteract, parsePlayerInput } from "../src/lib/gameRoomNet/protocol"
 import { parseBulletinInput } from "../src/lib/game-room-control"
 import { parseRoomMusicInput } from "../src/lib/game-room-music"
-import { demoTeams } from "./demo-roster"
 
 const PORT = Number(process.env.PORT ?? 8787)
 /** Comment frames defeat idle-connection buffering in proxies. */
 const KEEPALIVE_MS = 15_000
 
-const teams = demoTeams()
-setGameRoomRoster(teams)
+// The desks belong to the agents, which the host draws client-side; the hub
+// seats nobody at them.
+setGameRoomRoster([])
 
 /**
- * Visitors who are not on the roster — everyone, in the demo, since the
- * roster is desks of made-up people. The room seats a guest with no desk of
- * their own. They announce themselves on the way in (POST /api/identity); a
+ * Visitors — everyone who connects. The room gives each a character with no
+ * desk. They announce themselves on the way in (POST /api/identity); a
  * visitor the hub has never heard of is a spectator until they do.
  */
 const guests = new Map<string, GuestUser>()
@@ -123,7 +122,7 @@ async function handle(request: Request): Promise<Response> {
     guests.set(id, {
       id,
       name: input.name.trim() || "Visitor",
-      role: input.role ?? "student",
+      role: input.role ?? "visitor",
       spriteId: typeof input.spriteId === "number" ? input.spriteId : null,
       spriteSheet: typeof input.spriteSheet === "string" ? input.spriteSheet : null,
     })
@@ -162,9 +161,6 @@ async function handle(request: Request): Promise<Response> {
     return ok ? new Response(null, { status: 204 }) : json({ error: "TOO_EARLY" }, 409)
   }
 
-  // ------------------------------------------------------------- demo feeds
-  if (path === "/api/roster") return json(teams)
-
   // -------------------------------------------------------- room controls
   if (path === "/api/room/music" && post) {
     try {
@@ -197,4 +193,3 @@ const server = Bun.serve({
 })
 
 console.log(`[gameroom] hub listening on http://localhost:${server.port}`)
-console.log(`[gameroom] ${teams.length} desks seated, ${teams.reduce((n, t) => n + t.players.length, 0)} characters`)
