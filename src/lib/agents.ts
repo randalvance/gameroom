@@ -134,3 +134,51 @@ export function hashAgentId(id: string): number {
   }
   return h >>> 0
 }
+
+/** Where an agent stands in its family's line: whose trail it follows, and
+ * how far back. */
+export interface FollowSlot {
+  /** The top of the family: the ancestor with no parent of its own. */
+  root: string
+  /** 1 for the first follower, 2 for the one behind it, and so on. */
+  rank: number
+}
+
+/**
+ * The line every family forms behind its root: each descendant, in
+ * depth-first order with siblings in list order, gets a rank along the
+ * root's trail. An agent whose parent is not in the list is a root itself,
+ * and a cycle is broken at the first agent seen twice.
+ */
+export function followSlots(agents: readonly Agent[]): Map<string, FollowSlot> {
+  const byId = new Map(agents.map((agent) => [agent.id, agent]))
+  const children = new Map<string, Agent[]>()
+  const roots: Agent[] = []
+  for (const agent of agents) {
+    const parent = agent.parentId !== undefined ? byId.get(agent.parentId) : undefined
+    if (!parent || parent === agent) {
+      roots.push(agent)
+      continue
+    }
+    const siblings = children.get(parent.id) ?? []
+    siblings.push(agent)
+    children.set(parent.id, siblings)
+  }
+  const slots = new Map<string, FollowSlot>()
+  const placed = new Set<string>()
+  const walk = (root: string, parentId: string, next: { rank: number }) => {
+    for (const child of children.get(parentId) ?? []) {
+      if (placed.has(child.id)) continue
+      placed.add(child.id)
+      slots.set(child.id, { root, rank: next.rank++ })
+      walk(root, child.id, next)
+    }
+  }
+  for (const root of roots) {
+    placed.add(root.id)
+    walk(root.id, root.id, { rank: 1 })
+  }
+  // A family that is all cycle has no root above it: its members stand on
+  // their own rather than chasing each other.
+  return slots
+}

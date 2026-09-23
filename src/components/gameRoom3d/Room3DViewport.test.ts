@@ -145,8 +145,8 @@ describe("roomAgentInputs", () => {
     const parent: Agent = { id: "p", name: "Parent", status: "idle" }
     const child: Agent = { id: "c", name: "Child", status: "working", parentId: "p" }
     const inputs = roomAgentInputs([parent, child])
-    expect(inputs[0]).toMatchObject({ id: "p", status: "working", style: DEFAULT_STATUS_STYLES.working })
-    expect(inputs[1]).toMatchObject({ id: "c", status: "working" })
+    expect(inputs[0]).toMatchObject({ id: "p", status: "working", style: DEFAULT_STATUS_STYLES.working, follow: null })
+    expect(inputs[1]).toMatchObject({ id: "c", status: "working", follow: { root: "p", rank: 1 } })
   })
 })
 

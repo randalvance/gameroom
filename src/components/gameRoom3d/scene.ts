@@ -27,7 +27,7 @@ import {
     PLAYER_SPEED_PX_PER_STEP,
     type ProbeCandidate,
 } from "../../lib/gameRoomNet/collision"
-import { bubbleTextFor, hashAgentId, type AgentStatus, type ResolvedStatusStyle } from "../../lib/agents"
+import { bubbleTextFor, hashAgentId, type AgentStatus, type FollowSlot, type ResolvedStatusStyle } from "../../lib/agents"
 import { seedWander, stepWander, WALK_SPEED } from "../../lib/gameRoomNet/wander"
 import { OBJECT_IDX_BASE, ROOM_OBJECTS, roomObjectByIdx } from "../../lib/gameRoomNet/objects"
 import { resolveRoomInteract, type RoomInteractTarget } from "../../lib/gameRoomNet/tables"
@@ -108,6 +108,8 @@ export interface RoomAgentInput {
     sprite?: number | string
     /** Halo tint override, as a CSS hex colour. */
     color?: string
+    /** Its place in a family's line: whose trail it follows, and how far back. */
+    follow?: FollowSlot | null
 }
 
 /** A character position pushed from the multiplayer hub, room-plan px. */
@@ -538,13 +540,15 @@ function drawScreenCanvas(ctx: CanvasRenderingContext2D, board: RoomBoard | null
     }
     ctx.fillStyle = TEXT_BRIGHT
     ctx.font = "bold 96px 'Courier New', monospace"
-    ctx.fillText(board?.title ?? roomTitle(), W / 2, 128, W - 160)
+    // The camera's usual framing clips the top of the panel, so the title
+    // sits a little lower than the panel's own centre line would put it.
+    ctx.fillText(board?.title ?? roomTitle(), W / 2, 150, W - 160)
     ctx.fillStyle = "#2840A8"
-    ctx.fillRect(90, 166, W - 180, 5)
+    ctx.fillRect(90, 188, W - 180, 5)
     ctx.fillStyle = "#A0B8FF"
-    ctx.font = "48px 'Courier New', monospace"
+    ctx.font = "44px 'Courier New', monospace"
     const lines = (board?.lines ?? []).slice(0, BOARD_MAX_LINES)
-    lines.forEach((line, index) => ctx.fillText(line, W / 2, 226 + index * 50, W - 180))
+    lines.forEach((line, index) => ctx.fillText(line, W / 2, 238 + index * 46, W - 180))
     // The panel below the content fades out rather than ending on a hard edge,
     // so the part down by the plinth reads as screen, not as a gap.
     const skirt = ctx.createLinearGradient(0, SCREEN_CONTENT_BOTTOM + 24, 0, H)
@@ -627,6 +631,14 @@ const AGENT_FADE_OUT_MS = 700
 /** Where the private character indexes for agents start: clear of the hub's
  * visitor indexes (small) and below the room objects (100 000). */
 const AGENT_IDX_BASE = 50_000
+/** How far behind the one in front each follower walks, in world units. */
+const FOLLOW_GAP = 1.5
+/** How much of a follower's gap to its spot survives one sim step. */
+const FOLLOW_KEEP_PER_STEP = 0.82
+/** A trail point is dropped every time the leader moves this far. */
+const TRAIL_STEP = 0.05
+/** How much trail a leader keeps: enough for a long line at FOLLOW_GAP. */
+const TRAIL_MAX_POINTS = 1_200
 
 
 /**
@@ -653,6 +665,12 @@ interface AgentState {
     seat: { table: number; seat: number } | null
     /** A fade-out in progress, after which the character is removed. */
     leaving: { startedAt: number } | null
+    /** Whose trail it walks, and how far back — null for a root. */
+    follow: FollowSlot | null
+    /** Which way it last walked while following. */
+    followDir: WalkDir
+    /** Where it has been, oldest first, for its followers to walk. */
+    trail: Array<{ x: number; z: number }>
 }
 
 interface CharState {
@@ -1671,7 +1689,68 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             }
         }
 
+        /**
+         * Where a follower should be: `rank` gaps back along its leader's trail,
+         * or, with no trail yet, lined up behind the leader against its facing.
+         */
+        const followSpot = (leader: CharState, rank: number): { x: number; z: number } => {
+            const trail = leader.agent?.trail ?? []
+            let remaining = rank * FOLLOW_GAP
+            let x = leader.x
+            let z = leader.z
+            for (let i = trail.length - 1; i >= 0; i--) {
+                const point = trail[i]!
+                const dx = x - point.x
+                const dz = z - point.z
+                const segment = Math.hypot(dx, dz)
+                if (segment >= remaining) {
+                    const t = segment === 0 ? 0 : remaining / segment
+                    return { x: x - dx * t, z: z - dz * t }
+                }
+                remaining -= segment
+                x = point.x
+                z = point.z
+            }
+            // Ran out of trail: extend the line straight back from its last leg,
+            // or behind the leader's facing when it has not walked at all.
+            let bx = 0
+            let bz = 1
+            const first = trail[0]
+            if (first && (first.x !== leader.x || first.z !== leader.z) && trail.length > 1) {
+                const last = trail[1]!
+                const dx = first.x - last.x
+                const dz = first.z - last.z
+                const len = Math.hypot(dx, dz)
+                if (len > 0) {
+                    bx = dx / len
+                    bz = dz / len
+                }
+            } else {
+                const facing = leader.agent?.follow ? leader.agent.followDir : (leader.teamIdx !== null ? walkPos(leader.phase, PARTICIPANT_TABLES[leader.teamIdx]!, leader.speed).dir : FACING_CAMERA)
+                const [vx, vy] = [[0, -1], [1, 0], [0, 1], [-1, 0]][facing]!
+                bx = -vx!
+                bz = -vy!
+            }
+            return { x: x + bx * remaining, z: z + bz * remaining }
+        }
+
         const authoritativePosition = (c: CharState) => {
+            // A follower walks its leader's trail. It eases onto its spot rather than
+            // sitting on it, so a line ripples when its leader turns.
+            if (c.agent?.follow) {
+                const leader = agentChars.get(c.agent.follow.root)
+                if (!leader || leader === c) return { x: c.x, z: c.z, dir: c.agent.followDir }
+                const spot = followSpot(leader, c.agent.follow.rank)
+                const closeness = 1 - FOLLOW_KEEP_PER_STEP
+                const x = c.x + (spot.x - c.x) * closeness
+                const z = c.z + (spot.z - c.z) * closeness
+                const dx = x - c.x
+                const dz = z - c.z
+                if (Math.hypot(dx, dz) > 0.004) {
+                    c.agent.followDir = facingForInput(dx, dz, c.agent.followDir)
+                }
+                return { x, z, dir: c.agent.followDir }
+            }
             // A character who is standing rather than walking a lap faces the camera:
             // these all used to pin dir 0, which is the row drawn from BEHIND.
             if (c.teamIdx === null) {
@@ -2174,10 +2253,39 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             c.agent.bubbleText = null
         }
 
+        /** Seat an agent at a desk, or take it out of one to follow its family. */
+        const applyAgentSeat = (c: CharState, agent: RoomAgentInput) => {
+            const state = c.agent!
+            const follow = agent.follow ?? null
+            const wasFollowing = state.follow !== null
+            state.follow = follow
+            if (follow && state.seat) {
+                // Called away from its desk: the seat frees for the next arrival.
+                releaseSeat(state.seat)
+                state.seat = null
+                c.teamIdx = null
+                c.transition = null
+            } else if (!follow && wasFollowing && !state.seat) {
+                // Back on its own: the emptiest desk, walked to from where it stands.
+                const seat = allocateSeat()
+                state.seat = seat
+                if (seat) {
+                    const wander = seedWander(c.playerIdx, seat.table, seat.seat)
+                    c.phase = wander.phase
+                    c.speed = wander.speed
+                    c.pauseLeft = wander.pauseLeft
+                    c.rng = wander.rng
+                    c.teamIdx = seat.table
+                    c.transition = { fromX: c.x, fromZ: c.z, startedAt: performance.now(), duration: AGENT_WALK_IN_MS }
+                }
+            }
+        }
+
         /** Give a character the look its agent's status asks for. */
         const applyAgentLook = (c: CharState, agent: RoomAgentInput) => {
             const state = c.agent!
             state.style = agent.style
+            applyAgentSeat(c, agent)
             if (c.name !== agent.name) {
                 c.name = agent.name
                 nameTagCache.get(c.playerIdx)?.dispose()
@@ -2222,7 +2330,8 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 if (cleanedUp || !latest) return
                 pendingAgents.delete(agent.id)
                 const playerIdx = nextAgentIdx++
-                const seat = allocateSeat()
+                // A follower takes no desk: it walks behind its family instead.
+                const seat = latest.follow ? null : allocateSeat()
                 const spawn = aisleSpot(playerIdx - AGENT_IDX_BASE)
                 const c = createCharacter({
                     playerIdx,
@@ -2235,10 +2344,21 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     x: toX(spawn.x),
                     z: toZ(spawn.y),
                 })
-                c.agent = { id: latest.id, style: latest.style, bubbleText: null, bubble: null, seat, leaving: null }
+                c.agent = {
+                    id: latest.id,
+                    style: latest.style,
+                    bubbleText: null,
+                    bubble: null,
+                    seat,
+                    leaving: null,
+                    follow: null,
+                    followDir: FACING_CAMERA,
+                    trail: [],
+                }
                 agentChars.set(latest.id, c)
-                // Walk in from the aisle to the desk's orbit over a beat.
-                if (seat) c.transition = { fromX: c.x, fromZ: c.z, startedAt: performance.now(), duration: AGENT_WALK_IN_MS }
+                // Walk in from the aisle to the desk's orbit (or the family's
+                // line) over a beat.
+                if (seat || latest.follow) c.transition = { fromX: c.x, fromZ: c.z, startedAt: performance.now(), duration: AGENT_WALK_IN_MS }
                 applyAgentLook(c, latest)
             })()
         }
@@ -2895,6 +3015,15 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 c.presenceHalo.position.set(c.x, 0.03, c.z)
             }
             for (const c of departed) finishAgentRemoval(c)
+            // Leaders leave a trail behind them for their followers to walk.
+            for (const c of chars) {
+                const state = c.agent
+                if (!state) continue
+                const last = state.trail[state.trail.length - 1]
+                if (last && Math.hypot(c.x - last.x, c.z - last.z) < TRAIL_STEP) continue
+                state.trail.push({ x: c.x, z: c.z })
+                if (state.trail.length > TRAIL_MAX_POINTS) state.trail.splice(0, state.trail.length - TRAIL_MAX_POINTS)
+            }
             // The snap's fade overrides the opacity and height just set.
             stepSnap(frameMs)
 

@@ -1,7 +1,7 @@
 import { logger } from "~/lib/logger"
 import { useEffect, useRef, useState, type RefObject } from "react"
 import { CW, CH } from "../gameRoom/constants"
-import { effectiveStatus, styleFor, type Agent, type StatusStyleOverrides } from "~/lib/agents"
+import { effectiveStatus, followSlots, styleFor, type Agent, type StatusStyleOverrides } from "~/lib/agents"
 import {
   nextRoomCameraPan,
   type RoomCameraPan,
@@ -167,6 +167,7 @@ export function RoomCameraLegend({ walkMode = false, onMenuToggle }: { walkMode?
  * about parents or the host's overrides.
  */
 export function roomAgentInputs(agents: readonly Agent[], statusStyles?: StatusStyleOverrides): RoomAgentInput[] {
+  const slots = followSlots(agents)
   return agents.map((agent) => {
     const status = effectiveStatus(agent, agents)
     return {
@@ -177,6 +178,7 @@ export function roomAgentInputs(agents: readonly Agent[], statusStyles?: StatusS
       activity: agent.activity,
       sprite: agent.sprite,
       color: agent.color,
+      follow: slots.get(agent.id) ?? null,
     }
   })
 }
@@ -189,7 +191,9 @@ function sameAgentInput(a: RoomAgentInput, b: RoomAgentInput): boolean {
     a.style === b.style &&
     a.activity === b.activity &&
     a.sprite === b.sprite &&
-    a.color === b.color
+    a.color === b.color &&
+    a.follow?.root === b.follow?.root &&
+    a.follow?.rank === b.follow?.rank
   )
 }
 

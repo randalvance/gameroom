@@ -5,6 +5,7 @@ import {
   countByStatus,
   DEFAULT_STATUS_STYLES,
   effectiveStatus,
+  followSlots,
   hashAgentId,
   styleFor,
   type Agent,
@@ -95,5 +96,34 @@ describe("hashAgentId", () => {
     expect(hashAgentId("agent-1")).toBe(hashAgentId("agent-1"))
     expect(hashAgentId("agent-1")).not.toBe(hashAgentId("agent-2"))
     expect(hashAgentId("")).toBe(0x811c9dc5)
+  })
+})
+
+describe("followSlots", () => {
+  it("lines a family up behind its root in depth-first order", () => {
+    const agents = [
+      agent("root", "idle"),
+      agent("a", "idle", { parentId: "root" }),
+      agent("a1", "idle", { parentId: "a" }),
+      agent("b", "idle", { parentId: "root" }),
+      agent("loner", "idle"),
+    ]
+    const slots = followSlots(agents)
+    expect(slots.get("a")).toEqual({ root: "root", rank: 1 })
+    expect(slots.get("a1")).toEqual({ root: "root", rank: 2 })
+    expect(slots.get("b")).toEqual({ root: "root", rank: 3 })
+    expect(slots.has("root")).toBe(false)
+    expect(slots.has("loner")).toBe(false)
+  })
+
+  it("treats an agent whose parent is missing as a root", () => {
+    const slots = followSlots([agent("orphan", "idle", { parentId: "gone" }), agent("kid", "idle", { parentId: "orphan" })])
+    expect(slots.has("orphan")).toBe(false)
+    expect(slots.get("kid")).toEqual({ root: "orphan", rank: 1 })
+  })
+
+  it("survives a cycle", () => {
+    const slots = followSlots([agent("a", "idle", { parentId: "b" }), agent("b", "idle", { parentId: "a" })])
+    expect(slots.size).toBe(0)
   })
 })
