@@ -1,6 +1,6 @@
 {
   "name": "@gameroom/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "An embeddable 3D pixel-art game room for React \u2014 sprites, character selection, arcade easter eggs, admin controls and music.",
   "license": "MIT",
   "type": "module",

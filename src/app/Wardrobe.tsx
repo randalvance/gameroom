@@ -11,14 +11,11 @@ import type { Identity } from "./identity"
 
 export function Wardrobe({
   identity,
-  loading,
   onChange,
   onEnter,
   onConsole,
 }: {
   identity: Identity
-  /** The roster is still on its way from the hub. */
-  loading: boolean
   onChange: (identity: Identity) => void
   onEnter: () => void
   onConsole: () => void
@@ -93,20 +90,20 @@ export function Wardrobe({
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10, marginTop: 8 }}>
               <button
                 type="button"
-                disabled={!ready || loading}
+                disabled={!ready}
                 onClick={onEnter}
                 style={{
-                  background: ready && !loading ? "var(--color-neon)" : "#000",
-                  border: `3px solid ${ready && !loading ? "var(--color-neon)" : "#1A1F38"}`,
-                  color: ready && !loading ? "#000" : "#5D6699",
+                  background: ready ? "var(--color-neon)" : "#000",
+                  border: `3px solid ${ready ? "var(--color-neon)" : "#1A1F38"}`,
+                  color: ready ? "#000" : "#5D6699",
                   fontFamily: "var(--font-display)",
                   fontSize: 12,
                   letterSpacing: "0.08em",
                   padding: "14px 26px",
-                  cursor: ready && !loading ? "pointer" : "default",
+                  cursor: ready ? "pointer" : "default",
                 }}
               >
-                {loading ? "SEATING THE ROOM…" : "ENTER THE ROOM →"}
+                {"ENTER THE ROOM →"}
               </button>
               {!ready && (
                 <span style={{ fontSize: 11, color: "#5D6699" }}>
