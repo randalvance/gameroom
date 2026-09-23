@@ -4,6 +4,11 @@
 // billboarded inside it. Layout comes from the shared 2D room plan: table
 // positions (PARTICIPANT_TABLES, px-space) mapped into world units (1 unit =
 // 1 tile = 16 px).
+//
+// The parts that are built once and left alone live under ./scene/ (the
+// shell, the furniture, the lights, the wall screen, the textures). This file
+// is what shares state with the frame loop: the characters and agents, the
+// local player's input, the camera, and the handle the room is driven by.
 import { logger } from "~/lib/logger"
 import * as THREE from "three"
 import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js"
@@ -31,16 +36,8 @@ import { bubbleTextFor, hashAgentId, type AgentStatus, type FollowSlot, type Res
 import { seedWander, stepWander, WALK_SPEED } from "../../lib/gameRoomNet/wander"
 import { OBJECT_IDX_BASE, ROOM_OBJECTS, roomObjectByIdx } from "../../lib/gameRoomNet/objects"
 import { resolveRoomInteract, type RoomInteractTarget } from "../../lib/gameRoomNet/tables"
-import {
-    PRIMEY_IDX,
-    PRIMEY_POINT,
-    PRIMEY_STRIP,
-    primeyCenterY,
-    primeyFrameOffset,
-    primeyPlaneSize,
-} from "./primey-npc"
-import { roomTitle } from "./room-branding"
-import { BIG_SCREEN_IDX, BIG_SCREEN_POINT, BOARD_MAX_LINES, type RoomBoard } from "./wall"
+import { PRIMEY_IDX, PRIMEY_POINT, PRIMEY_STRIP, primeyFrameOffset } from "./primey-npc"
+import { BIG_SCREEN_IDX, BIG_SCREEN_POINT, type RoomBoard } from "./wall"
 import { localMinutes, parseTimeOverride, skyPalette } from "./time-of-day"
 import type { RoomSelection } from "./selection"
 import {
@@ -55,15 +52,12 @@ import { createBackdrop } from "./backdrop"
 import { createBackroomsHatch, maskHatchOpening } from "./backrooms-hatch"
 import { ARCADE_IDX, ARCADE_POINT, createArcadeCabinet } from "./arcade-cabinet"
 import { createArcadeReveal, REVEAL, type ArcadeReveal } from "./arcade-reveal"
-import { isHouseTable } from "../gameRoom/constants"
-import { tableLegColorFor, tableTopColorFor } from "./desks"
 import { advanceSimClock } from "./sim-clock"
 import {
     clampRoomCameraPan,
     followRoomCameraPan,
     isDragPan,
     panFromDrag,
-    ROOM_CAMERA_MAX_PAN_SOUTH,
     type RoomCameraPan,
 } from "./camera-pan"
 import {
@@ -83,7 +77,6 @@ import { parseNoclipOverride } from "./noclip"
 import { chooseSnapped, createSnapDissolve, type SnapDissolve } from "./thanos-snap"
 import {
     createFrameBudgetWatcher,
-    deskLightPlan,
     detectQualitySignals,
     nextTierDown,
     parseQualityOverride,
@@ -95,501 +88,17 @@ import {
     type QualitySettings,
     type QualityTier,
 } from "./quality-tier"
+import type { CreateRoomOptions, RoomAgentInput, RoomSceneHandle, RoomSelfState } from "./scene/types"
+import { NORTH_APRON, ROOM_D, ROOM_W, toX, toZ } from "./scene/layout"
+import { loadTexture, makeNameTagTexture, makeSparkTexture, makeSpeechTexture } from "./scene/textures"
+import { ROOM_EXPOSURE, RoomGradeShader } from "./scene/post-fx"
+import { buildRoomShell } from "./scene/room-shell"
+import { buildBigScreen } from "./scene/big-screen"
+import { buildPrimey } from "./scene/primey"
+import { buildLighting } from "./scene/lighting"
+import { buildFurniture } from "./scene/furniture"
 
-/** An agent as the scene draws it: the host's agent, its status rolled up
- * and its look resolved. Hand the same id in again to change any of it. */
-export interface RoomAgentInput {
-    id: string
-    name: string
-    status: AgentStatus
-    style: ResolvedStatusStyle
-    activity?: string
-    /** A stock sheet index, or a URL to a 6×4 sheet. Absent derives one from the id. */
-    sprite?: number | string
-    /** Halo tint override, as a CSS hex colour. */
-    color?: string
-    /** Its place in a family's line: whose trail it follows, and how far back. */
-    follow?: FollowSlot | null
-}
-
-/** A character position pushed from the multiplayer hub, room-plan px. */
-export interface RoomNetState {
-    playerIdx: number
-    x: number
-    y: number
-    dir: WalkDir
-    moving: boolean
-    live: boolean
-}
-
-/** The local player's own state, reported back up to the hub. Room-plan px. */
-export interface RoomSelfState {
-    x: number
-    y: number
-    dir: WalkDir
-    moving: boolean
-}
-
-export interface CreateRoomOptions {
-    onPick?: (pick: RoomSelection) => void
-    /** Dragging the floor moves the camera; this reports where it ended up. */
-    onCameraPan?: (pan: RoomCameraPan) => void
-    /** A pinch zoomed the camera; this keeps the viewport's zoom state (and so
-     * the +/− buttons and wheel) carrying on from where the fingers left it. */
-    onCameraZoom?: (zoom: number) => void
-    /** The local player's character moved/turned (throttled to ~10 Hz). */
-    onSelfState?: (state: RoomSelfState) => void
-    /** The local player pressed interact while facing this visitor's character
-     * (or a room object). What happens next is the hub's. */
-    onInteract?: (targetPlayerIdx: number) => void
-    /** The local player pressed interact while facing this agent. Local: the
-     * host decides what a conversation with an agent is. */
-    onAgentInteract?: (agentId: string) => void
-    /** The local player pressed interact while facing this desk. Unlike
-     * onInteract this never reaches the hub — it opens local UI, broadcasts
-     * nothing and freezes nobody. */
-    onTableInteract?: (tableIdx: number) => void
-    /** The local player pressed interact while facing Primey. Local UI only —
-     * the chat is one visitor's, so like the desks this never reaches the hub. */
-    onPrimeyInteract?: () => void
-    onBackroomsEnter?: () => void
-    /** The local player pressed interact while facing the arcade cabinet (or
-     * clicked it). Local UI only — the cabinet exists in this client's scene
-     * alone, so this never reaches the hub. */
-    onArcadeInteract?: () => void
-    /** The cabinet just hit the floor in its entrance — a cue for the thud. */
-    onArcadeLanded?: () => void
-    /**
-     * Pin the rendering tier instead of measuring the device. A `?quality=`
-     * search param beats this, and both beat auto-detection; the runtime
-     * frame-budget watcher is disabled entirely whenever a tier is pinned,
-     * because a pin is a deliberate instruction and not a starting guess.
-     */
-    quality?: QualityTier
-    /** The tier changed — either resolved at build, or dropped mid-session
-     * because the room could not hold its frame budget. */
-    onQualityChange?: (tier: QualityTier) => void
-}
-
-export interface RoomSceneHandle {
-    setSelection(selection: RoomSelection): void
-    setCameraPan(x: number, z: number): void
-    setCameraZoom(zoom: number): void
-    /**
-     * An agent arrived, or changed. A new one is seated at the emptiest desk
-     * and walks in from the aisle; past the desks it stands in the aisle. A
-     * known one takes the new name, status, look and bubble in place.
-     */
-    upsertAgent(agent: RoomAgentInput): void
-    /** The agent is gone: it fades out where it stands and its seat frees. */
-    removeAgent(agentId: string): void
-    /** A speech bubble over an agent, for `ms` (the room's default when
-     * absent) — the host's answer to onAgentInteract, or anything else it
-     * wants said. */
-    say(agentId: string, text: string, ms?: number): void
-    /** Hub-driven positions for the other visitors (the local player is skipped). */
-    setNetStates(states: readonly RoomNetState[]): void
-    /** Hand keyboard control of a character to this client (null releases it). */
-    setLocalPlayer(playerIdx: number | null, start?: { x: number; y: number }): void
-    /** Disable local movement and interaction without stopping the scene or
-     * network. Disabling also releases any movement that is already held. */
-    setLocalInputDisabled(disabled: boolean): void
-    setBackroomsUnlocked?(unlocked: boolean): void
-    /** Show or hide the Konami-code arcade cabinet beside Primey. Private to
-     * this client; built on first reveal, which plays the drop-in entrance
-     * unless `entrance` is false (already unlocked on an earlier visit). */
-    setArcadeVisible?(visible: boolean, entrance?: boolean): void
-    /** Show or hide Primey. Hidden, it is neither drawn nor an interact target
-     * hidden, the room has no mascot). */
-    setPrimeyVisible?(visible: boolean): void
-    /** Half of the other characters, at random, crumble to dust. Private to
-     * this client and forgotten on reload — nothing reaches the hub. Snapping
-     * again takes half of whoever is left. */
-    thanosSnap?(): void
-    setRenderPaused?(paused: boolean): void
-    /** A speech bubble above a character (an interact introduction landing). */
-    showSpeech(playerIdx: number, text: string): void
-    /** A speech bubble above an interactable object (OBJECT_IDX_BASE-keyed). */
-    showObjectSpeech(objectIdx: number, text: string): void
-    /** The wall's resting page: a title and a few lines, or null for the
-     * room's title alone. */
-    setBoard(board: RoomBoard | null): void
-    /**
-     * A bulletin taking over the wall, or null to hand it back.
-     *
-     * While one is up every camera in the room turns to the wall and holds —
-     * the furniture stands down so the whole text can be read — and is handed
-     * back when it comes down, unless the player has since taken the camera
-     * elsewhere themselves.
-     */
-    setBulletin(text: string | null): void
-    /** Lock the local player's movement for a conversation; optionally turn
-     * them to face their dialog partner. */
-    freezeLocalInput(ms: number, faceDir?: WalkDir): void
-    /** A connected visitor with no seat on the map: add their transient
-     * character (idempotent; sprite decode may land it a frame later). */
-    upsertGuest(guest: {
-        playerIdx: number
-        name: string
-        role?: RoomRole
-        spriteId?: number | null
-        spriteSheet?: string | null
-        start?: { x: number; y: number }
-    }): void
-    /** The visitor left — their character disappears. */
-    removeGuest(playerIdx: number): void
-    /** Touch D-pad: hold or release one of the local character's movement
-     * inputs — the same state the WASD keys drive. */
-    setMoveInput(direction: "up" | "down" | "left" | "right", active: boolean): void
-    /** Touch interact button — the same facing probe as the Space key. */
-    interact(): void
-    /** What a spectator's touch interact button lands on: the character or
-     * table nearest the centre of the view. */
-    pickNearCenter(): RoomSelection
-    /**
-     * Retune the live scene from the player's GRAPHICS choice, without a
-     * rebuild — the game-room menu sits over a running room, so the change has
-     * to be visible on the next frame rather than on the next visit.
-     *
-     * `"auto"` hands the decision back to device detection and re-arms the
-     * frame-budget watcher; any tier pins it and stands the watcher down.
-     */
-    setQualityPreference(preference: GraphicsPreference): void
-    dispose(): void
-}
-
-// ---------------------------------------------------------------- constants
-
-const ROOM_W = CW / TILE // 50 units wide
-const ROOM_D = (CH - WALL_Y) / TILE // ~52 units deep
-const WALL_H = 13
-/**
- * The desk rows (px), north to south. Rugs run in the aisles between them and
- * the warm ceiling pools sit over them, so both follow the plan wherever the
- * rows move — the room plan is the one place the grid is written down.
- */
-const TABLE_ROWS = [...new Set(PARTICIPANT_TABLES.map((t) => t.y))]
-    .sort((a, b) => a - b)
-    .map((y) => {
-        const h = PARTICIPANT_TABLES.find((t) => t.y === y)!.h
-        return { top: y, bottom: y + h, center: y + h / 2 }
-    })
-
-/** The desk columns' centres (px), west to east — one ceiling pool each. */
-const TABLE_COL_CENTERS = [
-    ...new Set(PARTICIPANT_TABLES.map((t) => t.x + t.w / 2)),
-].sort((a, b) => a - b)
-/**
- * How far north of the front wall the tower's floor slab runs.
- *
- * Nothing is built out there any more — the front wall is solid screen from
- * the floor up, so a room behind it was polygons nobody could see. The apron
- * stays because it is what the skyline rings stand off from: shrinking it
- * would walk the city several units closer to the glass.
- */
-const NORTH_APRON = 7.9
-const toX = (px: number) => px / TILE - ROOM_W / 2
-const toZ = (py: number) => (py - WALL_Y) / TILE
-
-// ---------------------------------------------------------------- textures
-
-function pixelTexture(tex: THREE.Texture): THREE.Texture {
-    tex.magFilter = THREE.NearestFilter
-    tex.minFilter = THREE.NearestFilter
-    tex.generateMipmaps = false
-    tex.colorSpace = THREE.SRGBColorSpace
-    return tex
-}
-
-function makeCanvasTexture(w: number, h: number, draw: (ctx: CanvasRenderingContext2D) => void): THREE.CanvasTexture {
-    const c = document.createElement("canvas")
-    c.width = w
-    c.height = h
-    const ctx = c.getContext("2d")!
-    draw(ctx)
-    const tex = new THREE.CanvasTexture(c)
-    return pixelTexture(tex) as THREE.CanvasTexture
-}
-
-// deterministic tiny PRNG so the floor/wood noise is stable
-function mulberry(seed: number) {
-    let s = seed >>> 0
-    return () => {
-        s = (s + 0x6d2b79f5) >>> 0
-        let t = Math.imul(s ^ (s >>> 15), 1 | s)
-        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-    }
-}
-
-/** A soft round spot for dust motes: bright core, feathered edge. */
-function makeSparkTexture(): THREE.CanvasTexture {
-    const size = 32
-    const c = document.createElement("canvas")
-    c.width = c.height = size
-    const ctx = c.getContext("2d")!
-    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
-    g.addColorStop(0, "rgba(255,255,255,1)")
-    g.addColorStop(0.35, "rgba(255,255,255,0.7)")
-    g.addColorStop(1, "rgba(255,255,255,0)")
-    ctx.fillStyle = g
-    ctx.fillRect(0, 0, size, size)
-    const tex = new THREE.CanvasTexture(c)
-    tex.colorSpace = THREE.SRGBColorSpace
-    return tex
-}
-
-function makeCarpetTexture(): THREE.CanvasTexture {
-    const rnd = mulberry(7)
-    const tones = ["#63666c", "#6a6d73", "#5e6167", "#666a70"]
-    const tex = makeCanvasTexture(128, 128, (ctx) => {
-        // grey carpet tiles with fibre speckle
-        for (let ty = 0; ty < 4; ty++) {
-            for (let tx = 0; tx < 4; tx++) {
-                ctx.fillStyle = tones[Math.floor(rnd() * tones.length)]!
-                ctx.fillRect(tx * 32, ty * 32, 32, 32)
-                ctx.fillStyle = "rgba(0,0,0,0.16)"
-                ctx.fillRect(tx * 32, ty * 32, 32, 1)
-                ctx.fillRect(tx * 32, ty * 32, 1, 32)
-                for (let i = 0; i < 170; i++) {
-                    ctx.fillStyle = rnd() > 0.5 ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.09)"
-                    ctx.fillRect(tx * 32 + Math.floor(rnd() * 32), ty * 32 + Math.floor(rnd() * 32), 1, 1)
-                }
-            }
-        }
-    })
-    tex.wrapS = THREE.RepeatWrapping
-    tex.wrapT = THREE.RepeatWrapping
-    tex.repeat.set(ROOM_W / 8, ROOM_D / 8)
-    return tex
-}
-
-function makeRugTexture(): THREE.CanvasTexture {
-    return makeCanvasTexture(128, 64, (ctx) => {
-        ctx.fillStyle = "#1a2350"
-        ctx.fillRect(0, 0, 128, 64)
-        ctx.strokeStyle = "#c8a040"
-        ctx.lineWidth = 2
-        ctx.strokeRect(4, 4, 120, 56)
-        ctx.strokeStyle = "#2c3a78"
-        ctx.strokeRect(9, 9, 110, 46)
-        const rnd = mulberry(21)
-        for (let i = 0; i < 220; i++) {
-            ctx.fillStyle = "rgba(0,0,0,0.14)"
-            ctx.fillRect(Math.floor(rnd() * 128), Math.floor(rnd() * 64), 1, 1)
-        }
-    })
-}
-
-/**
- * The brightest any text in the room is allowed to be drawn.
- *
- * Pure white (#FFFFFF) made the wall screen's headline, the team names and
- * the floating name tags read as lit signage rather than lettering. This
- * off-white sits near 0.67 linear luminance, so text is drawn and not lit.
- */
-const TEXT_BRIGHT = "#CBD6EC"
-
-function makeNameTagTexture(name: string): THREE.CanvasTexture {
-    const label = (name.split(" ")[0] ?? name).toUpperCase()
-    return makeCanvasTexture(256, 64, (ctx) => {
-        ctx.font = "bold 26px 'Courier New', monospace"
-        const tw = Math.min(210, ctx.measureText(label).width)
-        const bw = tw + 44
-        const x0 = (256 - bw) / 2
-        ctx.fillStyle = "rgba(4,8,24,0.92)"
-        ctx.fillRect(x0, 10, bw, 42)
-        ctx.strokeStyle = "#3050c8"
-        ctx.lineWidth = 3
-        ctx.strokeRect(x0, 10, bw, 42)
-        ctx.textAlign = "center"
-        ctx.textBaseline = "middle"
-        ctx.fillStyle = TEXT_BRIGHT
-        ctx.fillText(label, 128, 33, 210)
-    })
-}
-
-function makeSpeechTexture(text: string): THREE.CanvasTexture {
-    const W = 384, H = 112
-    return makeCanvasTexture(W, H, (ctx) => {
-        ctx.font = "bold 21px 'Courier New', monospace"
-        // Greedy word wrap into at most three lines; anything longer is elided.
-        const words = text.split(/\s+/)
-        const lines: string[] = []
-        let line = ""
-        for (const word of words) {
-            const candidate = line ? `${line} ${word}` : word
-            if (ctx.measureText(candidate).width <= W - 48 || !line) {
-                line = candidate
-                continue
-            }
-            lines.push(line)
-            line = word
-            if (lines.length === 3) break
-        }
-        if (lines.length < 3 && line) lines.push(line)
-        else if (line && lines[2]) lines[2] = `${lines[2]}…`
-
-        const boxH = 26 * lines.length + 18
-        const boxY = H - 14 - boxH
-        ctx.fillStyle = "rgba(4,8,24,0.94)"
-        ctx.fillRect(10, boxY, W - 20, boxH)
-        ctx.strokeStyle = "#FFD040"
-        ctx.lineWidth = 3
-        ctx.strokeRect(12, boxY + 2, W - 24, boxH - 4)
-        // the little tail that points the bubble at its speaker
-        ctx.fillStyle = "#FFD040"
-        ctx.beginPath()
-        ctx.moveTo(W / 2 - 9, H - 14)
-        ctx.lineTo(W / 2 + 9, H - 14)
-        ctx.lineTo(W / 2, H - 2)
-        ctx.closePath()
-        ctx.fill()
-        ctx.textAlign = "center"
-        ctx.textBaseline = "middle"
-        ctx.fillStyle = TEXT_BRIGHT
-        lines.forEach((l, i) => {
-            ctx.fillText(l, W / 2, boxY + 22 + i * 26, W - 56)
-        })
-    })
-}
-
-function makeHighlightTexture(): THREE.CanvasTexture {
-    return makeCanvasTexture(128, 128, (ctx) => {
-        ctx.strokeStyle = "#FFD040"
-        ctx.lineWidth = 5
-        ctx.strokeRect(6, 6, 116, 116)
-        ctx.strokeStyle = "rgba(255,208,64,0.35)"
-        ctx.lineWidth = 12
-        ctx.strokeRect(12, 12, 104, 104)
-    })
-}
-
-// ---------------------------------------------------------------- screen
-
-// The wall-spanning screen: canvas keeps the plane's ~4:1 aspect at a
-// resolution where the countdown digits survive the bigger surface.
-const SCREEN_TEX_W = 1920
-const SCREEN_TEX_H = 468
-
-/**
- * How far down the canvas the readable content may run.
- *
- * The screen reaches the roof, but its bottom edge runs down behind the
- * surround's plinth and the near rows of the room, so anything below this
- * line is read by nobody. Everything legible lives above it; the band
- * underneath is deliberately empty panel.
- */
-const SCREEN_CONTENT_BOTTOM = 330
-
-/** Greedy word wrap into at most `maxLines` lines; a longer text is elided. */
-function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
-    const words = text.split(/\s+/).filter(Boolean)
-    const lines: string[] = []
-    for (const word of words) {
-        const at = lines.length - 1
-        const candidate = at < 0 ? word : `${lines[at]} ${word}`
-        if (at < 0 || ctx.measureText(candidate).width > maxWidth) lines.push(word)
-        else lines[at] = candidate
-    }
-    const visible = lines.slice(0, maxLines)
-    if (lines.length > visible.length && visible.length > 0) {
-        visible[visible.length - 1] = `${visible[visible.length - 1]!.replace(/[.…]+$/, "")}…`
-    }
-    return visible
-}
-
-/**
- * The wall: a bulletin while one is up, otherwise the board — the host's
- * title and lines, or the room's own title over an empty band.
- */
-function drawScreenCanvas(ctx: CanvasRenderingContext2D, board: RoomBoard | null, bulletin: string | null) {
-    const W = SCREEN_TEX_W, H = SCREEN_TEX_H
-    ctx.fillStyle = "#020510"
-    ctx.fillRect(0, 0, W, H)
-    ctx.strokeStyle = "#3050c8"
-    ctx.lineWidth = 8
-    ctx.strokeRect(8, 8, W - 16, H - 16)
-    ctx.textAlign = "center"
-    if (bulletin) {
-        ctx.fillStyle = "#A51F32"
-        ctx.fillRect(12, 12, W - 24, 88)
-        ctx.fillStyle = "#FFF4F4"
-        ctx.font = "bold 56px 'Courier New', monospace"
-        ctx.fillText("◆ ANNOUNCEMENT ◆", W / 2, 75)
-        ctx.fillStyle = TEXT_BRIGHT
-        ctx.font = "bold 46px 'Courier New', monospace"
-        // Three lines from here still finish above SCREEN_CONTENT_BOTTOM.
-        wrapLines(ctx, bulletin, W - 180, 3).forEach((line, index) => ctx.fillText(line, W / 2, 175 + index * 60, W - 180))
-        return
-    }
-    ctx.fillStyle = TEXT_BRIGHT
-    ctx.font = "bold 96px 'Courier New', monospace"
-    // The camera's usual framing clips the top of the panel, so the title
-    // sits a little lower than the panel's own centre line would put it.
-    ctx.fillText(board?.title ?? roomTitle(), W / 2, 150, W - 160)
-    ctx.fillStyle = "#2840A8"
-    ctx.fillRect(90, 188, W - 180, 5)
-    ctx.fillStyle = "#A0B8FF"
-    ctx.font = "44px 'Courier New', monospace"
-    const lines = (board?.lines ?? []).slice(0, BOARD_MAX_LINES)
-    lines.forEach((line, index) => ctx.fillText(line, W / 2, 238 + index * 46, W - 180))
-    // The panel below the content fades out rather than ending on a hard edge,
-    // so the part down by the plinth reads as screen, not as a gap.
-    const skirt = ctx.createLinearGradient(0, SCREEN_CONTENT_BOTTOM + 24, 0, H)
-    skirt.addColorStop(0, "rgba(40,64,168,0.20)")
-    skirt.addColorStop(1, "rgba(4,8,24,0)")
-    ctx.fillStyle = skirt
-    ctx.fillRect(12, SCREEN_CONTENT_BOTTOM + 24, W - 24, H - SCREEN_CONTENT_BOTTOM - 36)
-}
-
-// ---------------------------------------------------------------- post fx
-
-/**
- * How much light the tone mapper lets through. Under 1 the whole frame reads
- * dimmer — the room is a lit interior at dusk, and at full exposure the floor
- * and desktops washed out to a flat glare that the warm point-light pools had
- * nothing left to stand out against.
- */
-const ROOM_EXPOSURE = 0.78
-
-// The frame's final grade. It used to be a tilt-shift — a 12-tap circular blur
-// that let go of everything away from a focus band — but the miniature effect
-// cost more legibility than it bought charm, so only the vignette and the grain
-// remain.
-const RoomGradeShader = {
-    uniforms: {
-        tDiffuse: { value: null as THREE.Texture | null },
-        uTime: { value: 0 },
-    },
-    vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-    fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform float uTime;
-    varying vec2 vUv;
-
-    float hash(vec2 p) {
-      return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-    }
-
-    void main() {
-      vec3 col = texture2D(tDiffuse, vUv).rgb;
-      // gentle vignette
-      vec2 vc = vUv - 0.5;
-      float vig = 1.0 - smoothstep(0.42, 0.95, length(vc) * 1.18) * 0.5;
-      col *= vig;
-      // faint film grain keeps large flat areas alive
-      col += (hash(vUv * (401.0 + fract(uTime))) - 0.5) * 0.028;
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `,
-}
+export type { CreateRoomOptions, RoomAgentInput, RoomNetState, RoomSceneHandle, RoomSelfState } from "./scene/types"
 
 // ---------------------------------------------------------------- helpers
 
@@ -685,11 +194,6 @@ interface CharState {
     } | null
     /** Hub-driven target (world units); set = this character is remote-synced. */
     net: { x: number; z: number; dir: WalkDir; moving: boolean; live: boolean } | null
-}
-
-async function loadTexture(loader: THREE.TextureLoader, url: string): Promise<THREE.Texture> {
-    const tex = await loader.loadAsync(url)
-    return pixelTexture(tex)
 }
 
 export async function createRoomScene(container: HTMLElement, opts: CreateRoomOptions): Promise<RoomSceneHandle> {
@@ -869,145 +373,11 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return new THREE.MeshLambertMaterial(rest)
         }
 
-        const carpetTex = track(makeCarpetTexture())
-        const floor = new THREE.Mesh(
-            track(new THREE.PlaneGeometry(ROOM_W, ROOM_D)),
-            track(surfaceMaterial({ map: carpetTex, roughness: 1, metalness: 0 })),
-        )
-        floor.rotation.x = -Math.PI / 2
-        floor.position.set(0, 0, ROOM_D / 2)
-        floor.receiveShadow = true
-        scene.add(floor)
-        const hatchOpeningMaterials: THREE.Material[] = [floor.material]
-
-        // ---- glass curtain walls -------------------------------------------------
-        const mullionMat = track(surfaceMaterial({ color: 0x343a46, roughness: 0.45, metalness: 0.6 }))
-        const glassMat = track(surfaceMaterial({
-            color: 0xa8c8e0, transparent: true, opacity: 0.13, roughness: 0.08,
-            metalness: 0, side: THREE.DoubleSide, depthWrite: false,
-        }))
-
-        const buildGlassWall = (width: number, height: number): THREE.Group => {
-            const g = new THREE.Group()
-            const glass = new THREE.Mesh(track(new THREE.PlaneGeometry(width, height)), glassMat)
-            glass.position.y = height / 2
-            g.add(glass)
-            const panes = Math.max(2, Math.round(width / 5))
-            const postGeo = track(new THREE.BoxGeometry(0.14, height, 0.14))
-            for (let i = 0; i <= panes; i++) {
-                const post = new THREE.Mesh(postGeo, mullionMat)
-                post.position.set(-width / 2 + (width / panes) * i, height / 2, 0)
-                g.add(post)
-            }
-            const railGeo = track(new THREE.BoxGeometry(width, 0.12, 0.12))
-            // The doubled wall gets a mid-height rail — floor, handrail, mid, cap —
-            // so the upper glass doesn't read as one unbroken sheet.
-            for (const ry of [0.08, 2.4, height * 0.55, height - 0.08]) {
-                const rail = new THREE.Mesh(railGeo, mullionMat)
-                rail.position.y = ry
-                g.add(rail)
-            }
-            return g
-        }
-
-        // No glass on the front wall: floor to roof, that face is the screen and its
-        // surround, and glazing behind an opaque panel is panes nobody can see.
-        const leftGlass = buildGlassWall(ROOM_D, WALL_H)
-        leftGlass.rotation.y = Math.PI / 2
-        leftGlass.position.set(-ROOM_W / 2, 0, ROOM_D / 2)
-        scene.add(leftGlass)
-        const rightGlass = buildGlassWall(ROOM_D, WALL_H)
-        rightGlass.rotation.y = -Math.PI / 2
-        rightGlass.position.set(ROOM_W / 2, 0, ROOM_D / 2)
-        scene.add(rightGlass)
-
-        // ---- the rest of our own tower -------------------------------------------
-        // With a real city outside, a floor plane ending in mid-air reads as a
-        // mistake rather than a diorama. A fascia over the glass line and a few
-        // storeys of the building falling away beneath the slab turn the cut-away
-        // into a floor OF something. The top stays open — the camera looks down
-        // into the room, so a ceiling would be all it ever saw.
-        {
-            const plateWest = -ROOM_W / 2
-            const plateEast = ROOM_W / 2
-            const plateNorth = -NORTH_APRON
-            // The slab runs past the south glass line by as much as the camera may pan
-            // that way (plus margin for the widest zoom), so panning down always lands
-            // the bottom of the frame on structure. Without it, buying enough southward
-            // pan to keep the last row's characters in frame would buy a view of the
-            // tower's blank south face as well.
-            const plateSouth = ROOM_D + ROOM_CAMERA_MAX_PAN_SOUTH + 3
-            const plateW = plateEast - plateWest
-            const plateD = plateSouth - plateNorth
-            const plateX = (plateWest + plateEast) / 2
-            const plateZ = (plateNorth + plateSouth) / 2
-
-            const fasciaMat = track(surfaceMaterial({ color: 0x232733, roughness: 0.55, metalness: 0.35 }))
-            // fascia band capping the glass, on the three walls that exist
-            const fasciaSpans: Array<[w: number, x: number, z: number, rotY: number]> = [
-                [ROOM_W + 0.7, 0, 0, 0],
-                [ROOM_D + 0.7, -ROOM_W / 2, ROOM_D / 2, Math.PI / 2],
-                [ROOM_D + 0.7, ROOM_W / 2, ROOM_D / 2, Math.PI / 2],
-            ]
-            for (const [w, x, z, rotY] of fasciaSpans) {
-                const fascia = new THREE.Mesh(track(new THREE.BoxGeometry(w, 0.85, 0.5)), fasciaMat)
-                fascia.position.set(x, WALL_H + 0.28, z)
-                fascia.rotation.y = rotY
-                scene.add(fascia)
-            }
-
-            // the slab edge itself, then two darker storeys stepping in and down —
-            // enough to read as "building continues" before the haze takes over.
-            // No storey's top may sit AT y=0 or flush against the box above: a face
-            // coplanar with the floor planes z-fights them, which reads as mottled
-            // carpet that shimmers whenever the camera moves. Each box instead starts
-            // a little inside the one above, so every pair of surfaces has real
-            // separation in depth.
-            const storeys: Array<[inset: number, top: number, depth: number, color: number]> = [
-                [0, -0.06, 1.1, 0x2e3340], // exposed floor slab, just under the carpet
-                [0.35, -1.05, 5.5, 0x141824], // storey below, glass in shadow
-                [0.9, -6.4, 7.7, 0x0b0e18], // and one more, sinking into the dark
-            ]
-            for (const [inset, top, depth, color] of storeys) {
-                const storey = new THREE.Mesh(
-                    track(new THREE.BoxGeometry(plateW - inset * 2, depth, plateD - inset * 2)),
-                    track(surfaceMaterial({ color, roughness: 0.8, metalness: 0.1 })),
-                )
-                storey.position.set(plateX, top - depth / 2, plateZ)
-                scene.add(storey)
-                hatchOpeningMaterials.push(storey.material)
-            }
-        }
-
-
-        // centre aisle rugs — one per gap between table rows, derived from the plan
-        // so they follow the rows wherever the layout puts them
-        const rugGeo = track(new THREE.PlaneGeometry(42, 3.4))
-        const rugMat = track(surfaceMaterial({ map: track(makeRugTexture()), roughness: 1 }))
-        for (let i = 0; i + 1 < TABLE_ROWS.length; i++) {
-            const aisleZ = (toZ(TABLE_ROWS[i]!.bottom) + toZ(TABLE_ROWS[i + 1]!.top)) / 2
-            const rug = new THREE.Mesh(rugGeo, rugMat)
-            rug.rotation.x = -Math.PI / 2
-            rug.position.set(0, 0.015, aisleZ)
-            rug.receiveShadow = true
-            scene.add(rug)
-        }
+        const { floor, hatchOpeningMaterials } = buildRoomShell(scene, { track, surfaceMaterial })
 
         // ------------------------------------------------------------ big screen
 
-        // The screen spans the whole front wall now — no suspension rods; it IS the
-        // wall face, sitting in a full-width surround that runs floor to roof line,
-        // where the fascia band caps it. The lit glass starts a unit up, so the
-        // surround reads as a plinth rather than the picture bleeding into the
-        // carpet.
-        const SCREEN_BOTTOM = 1
-        const SCREEN_H = WALL_H - SCREEN_BOTTOM
-        const SCREEN_W = ROOM_W - 0.8
-        const SCREEN_CY = SCREEN_BOTTOM + SCREEN_H / 2
-        const screenCanvas = document.createElement("canvas")
-        screenCanvas.width = SCREEN_TEX_W
-        screenCanvas.height = SCREEN_TEX_H
-        const screenCtx = screenCanvas.getContext("2d")!
+        const { SCREEN_W, SCREEN_H, SCREEN_CY, screen, screenGlowLights, draw: drawScreen } = buildBigScreen(scene, { track, surfaceMaterial })
         /** The wall's resting page, or null for the room's title alone. */
         let board: RoomBoard | null = null
         /** The bulletin up on the wall, or null while it shows the board. */
@@ -1016,39 +386,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         // presses Escape mid-bulletin has taken the camera back, and the bulletin
         // coming down must not yank it away from wherever they went.
         let bulletinFocusHeld = false
-        const redrawScreen = () => {
-            drawScreenCanvas(screenCtx, board, bulletinText)
-            screenTex.needsUpdate = true
-        }
-        drawScreenCanvas(screenCtx, board, bulletinText)
-        const screenTex = track(pixelTexture(new THREE.CanvasTexture(screenCanvas)) as THREE.CanvasTexture)
-        // The surround runs from the floor to the wall head: it is the only thing
-        // standing on this face now, so anything it fails to cover is a gap onto
-        // the empty world outside. The top is flush with the wall head rather than
-        // floating above the roof.
-        const frameBottom = 0
-        const frameH = WALL_H - frameBottom
-        const screenFrame = new THREE.Mesh(
-            track(new THREE.BoxGeometry(ROOM_W, frameH, 0.3)),
-            track(surfaceMaterial({ color: 0x10162e, roughness: 0.5, metalness: 0.4 })),
-        )
-        screenFrame.position.set(0, frameBottom + frameH / 2, 0.16)
-        scene.add(screenFrame)
-        const screen = new THREE.Mesh(
-            track(new THREE.PlaneGeometry(SCREEN_W, SCREEN_H)),
-            track(new THREE.MeshBasicMaterial({ map: screenTex, toneMapped: false })),
-        )
-        screen.position.set(0, SCREEN_CY, 0.33)
-        scene.add(screen)
-
-        // Twice the glass, twice the throw: a pair of glows so the wall-wide screen
-        // lights the room's front end evenly instead of one hot centre pool.
-        const screenGlowLights = [-ROOM_W / 4, ROOM_W / 4].map((gx) => {
-            const screenGlow = new THREE.PointLight(0x6090ff, 34, 20, 2)
-            screenGlow.position.set(gx, SCREEN_CY + 0.6, 2.8)
-            scene.add(screenGlow)
-            return screenGlow
-        })
+        const redrawScreen = () => drawScreen(board, bulletinText)
 
         // ------------------------------------------------------------ wall decor
 
@@ -1212,272 +550,21 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
         // ------------------------------------------------------------ Primey
 
-        // The mascot, standing in the arrivals band as a billboard. The idle strip
-        // is one row of square cells, so a 1/frames-wide texture repeat picks the
-        // cell and the tick below walks the offset along it — no per-frame texture
-        // upload, just a uniform.
-        //
-        // Basic, not Lambert: Primey is a lit screen on legs, and a mascot that
-        // dims with the room's evening palette reads as switched off rather than as
-        // the one thing in here you can ask a question.
-        const primeySize = primeyPlaneSize()
-        const primeyTex = track(await loadTexture(loader, PRIMEY_STRIP.url))
-        primeyTex.repeat.set(1 / PRIMEY_STRIP.frames, 1)
-        const primeyMat = track(new THREE.MeshBasicMaterial({
-            map: primeyTex,
-            transparent: true,
-            alphaTest: 0.4,
-            side: THREE.DoubleSide,
-        }))
-        const primeyMesh = new THREE.Mesh(
-            track(new THREE.PlaneGeometry(primeySize.width, primeySize.height)),
-            primeyMat,
-        )
-        primeyMesh.position.set(toX(PRIMEY_POINT.x), primeyCenterY(), toZ(PRIMEY_POINT.y))
-        scene.add(primeyMesh)
+        const { primeyMesh, primeyTex } = await buildPrimey(scene, loader, { track, surfaceMaterial })
         let primeyVisible = true
-
 
         // ------------------------------------------------------------ lighting
 
-        // Ambient bounce, key and rim all start at arbitrary values — the palette
-        // overwrites colour and intensity before the first frame, so the interior
-        // light always agrees with whatever the city outside is doing.
-        const hemi = new THREE.HemisphereLight(0x8fb0d8, 0x3a3d42, 0.75)
-        scene.add(hemi)
-        const key = new THREE.DirectionalLight(0xfff2dd, 1.1)
-        key.position.set(14, 30, 44)
-        key.castShadow = true
-        key.shadow.mapSize.set(q.shadowMapSize, q.shadowMapSize)
-        // Frustum sized for the doubled floor plate, not the old half-depth room.
-        key.shadow.camera.left = -36
-        key.shadow.camera.right = 36
-        key.shadow.camera.top = 48
-        key.shadow.camera.bottom = -30
-        key.shadow.camera.far = 140
-        key.shadow.bias = -0.002
-        scene.add(key)
-        const rim = new THREE.DirectionalLight(0x4060ff, 0.5)
-        rim.position.set(0, 14, -16)
-        scene.add(rim)
-
-        // Warm pools over the desk rows. The pendant fixtures these hung from are
-        // gone — cords dangling from an open sky read wrong once the room got a
-        // real backdrop — but the pools they cast stay, as unseen sources. One rank
-        // per table row, centred on the row, so every row gets its pools.
-        //
-        // This rank is the room's single largest GPU cost: three.js is a forward
-        // renderer, so all sixteen are evaluated per fragment of every Standard
-        // material in the room. The cheap tiers merge columns into fewer, wider,
-        // brighter pools — hence the rebuild rather than a fixed rig.
-        const deskLights: THREE.PointLight[] = []
-        const buildDeskLights = (perRow: number) => {
-            for (const light of deskLights) {
-                scene.remove(light)
-                light.dispose()
-            }
-            deskLights.length = 0
-            for (const row of TABLE_ROWS) {
-                const lz = toZ(row.center)
-                for (const plan of deskLightPlan(TABLE_COL_CENTERS, perRow)) {
-                    const pt = new THREE.PointLight(0xffb066, plan.intensity, plan.distance, 2)
-                    pt.position.set(toX(plan.x), 5.4, lz)
-                    // Its full brightness, so the house lights can dim and come back.
-                    pt.userData.baseIntensity = plan.intensity
-                    scene.add(pt)
-                    deskLights.push(pt)
-                }
-            }
-            applyLightLevel()
-        }
-
-        // ---- house lights ---------------------------------------------------------
-        // The palette's three lights and the desk pools, retuned whenever the
-        // clock outside moves.
-        const applyLightLevel = () => {
-            if (palette) {
-                hemi.intensity = palette.hemiIntensity
-                key.intensity = palette.keyIntensity
-                rim.intensity = palette.rimIntensity
-            }
-            for (const light of deskLights) light.intensity = light.userData.baseIntensity as number
-        }
-        buildDeskLights(q.deskLightsPerRow)
-        registerCleanup(() => {
-            for (const light of deskLights) light.dispose()
+        const { hemi, key, rim, deskLights, buildDeskLights, applyLightLevel } = buildLighting(scene, {
+            shadowMapSize: q.shadowMapSize,
+            getPalette: () => palette,
+            registerCleanup,
         })
-
+        buildDeskLights(q.deskLightsPerRow)
 
         // ------------------------------------------------------------ tables
 
-        const tableTopMaterials = new Map<number, THREE.MeshStandardMaterial | THREE.MeshLambertMaterial>()
-        const tableMaterial = (
-            color: number,
-            cache: Map<number, THREE.MeshStandardMaterial | THREE.MeshLambertMaterial>,
-            roughness = 0.8,
-        ) => {
-            let material = cache.get(color)
-            if (!material) {
-                material = track(surfaceMaterial({ color, roughness }))
-                cache.set(color, material)
-            }
-            return material
-        }
-        const tableLegMaterials = new Map<number, THREE.MeshStandardMaterial | THREE.MeshLambertMaterial>()
-        const exhibitionAccentMat = track(surfaceMaterial({ color: 0x65d9c8, roughness: 0.38, metalness: 0.35 }))
-        const chairMat = track(surfaceMaterial({ color: 0x223060, roughness: 0.75 }))
-        const chairLegMat = track(surfaceMaterial({ color: 0x2b2f38, roughness: 0.6, metalness: 0.4 }))
-        const tableTopGeo = track(new THREE.BoxGeometry(5.5, 0.24, 3))
-        const tableLegGeo = track(new THREE.BoxGeometry(0.28, 1.45, 0.28))
-        const chairSeatGeo = track(new THREE.BoxGeometry(0.85, 0.14, 0.85))
-        const chairBackGeo = track(new THREE.BoxGeometry(0.85, 0.95, 0.12))
-        const chairLegGeo = track(new THREE.BoxGeometry(0.1, 0.62, 0.1))
-        const laptopBaseGeo = track(new THREE.BoxGeometry(0.78, 0.06, 0.55))
-        const exhibitionInlayGeo = track(new THREE.BoxGeometry(4.85, 0.018, 0.075))
-        const laptopAccentGeo = track(new THREE.BoxGeometry(0.26, 0.012, 0.045))
-        const laptopScreenGeo = track(new THREE.PlaneGeometry(0.72, 0.48))
-        const laptopBodyMat = track(surfaceMaterial({ color: 0x22283e, roughness: 0.4, metalness: 0.5 }))
-        const laptopGlowMats = [0x54ffd8, 0x86ff6a, 0x6ab6ff].map((c) =>
-            track(new THREE.MeshBasicMaterial({ color: c, toneMapped: false })),
-        )
-        const contactShadowTex = track(makeCanvasTexture(64, 64, (ctx) => {
-            const g = ctx.createRadialGradient(32, 32, 6, 32, 32, 32)
-            g.addColorStop(0, "rgba(0,0,0,0.42)")
-            g.addColorStop(1, "rgba(0,0,0,0)")
-            ctx.fillStyle = g
-            ctx.fillRect(0, 0, 64, 64)
-        }))
-        const contactShadowMat = track(new THREE.MeshBasicMaterial({ map: contactShadowTex, transparent: true, depthWrite: false }))
-        const contactShadowGeo = track(new THREE.PlaneGeometry(1, 1))
-
-        /**
-         * The room furniture that stands between the camera and the wall screen —
-         * the team tables. Framing the screen stands them down
-         * so they stop covering the band the text is written in; backing out
-         * puts them back. Collected as they are built rather than searched for by
-         * name, so a new piece of furniture in front of the screen only has to be
-         * pushed here.
-         */
-        const screenOccluders: THREE.Object3D[] = []
-        const tableHitboxes: THREE.Mesh[] = []
-        const hitboxGeo = track(new THREE.BoxGeometry(6.4, 2.6, 4))
-        const hitboxMat = track(new THREE.MeshBasicMaterial({ visible: false }))
-
-        const chairAt = (group: THREE.Group | THREE.Scene, dx: number, dz: number, rotY: number) => {
-            const chair = new THREE.Group()
-            const seat = new THREE.Mesh(chairSeatGeo, chairMat)
-            seat.position.y = 0.66
-            seat.castShadow = true
-            chair.add(seat)
-            const back = new THREE.Mesh(chairBackGeo, chairMat)
-            back.position.set(0, 1.12, -0.38)
-            back.castShadow = true
-            chair.add(back)
-            for (const [lx, lz] of [[-0.33, -0.33], [0.33, -0.33], [-0.33, 0.33], [0.33, 0.33]] as const) {
-                const leg = new THREE.Mesh(chairLegGeo, chairLegMat)
-                leg.position.set(lx, 0.31, lz)
-                chair.add(leg)
-            }
-            chair.position.set(dx, 0, dz)
-            chair.rotation.y = rotY
-            group.add(chair)
-        }
-
-        PARTICIPANT_TABLES.forEach((tbl, ti) => {
-            const cx = toX(tbl.x + tbl.w / 2)
-            const cz = toZ(tbl.y + tbl.h / 2)
-            const houseDesk = isHouseTable(ti)
-            const group = new THREE.Group()
-            group.position.set(cx, 0, cz)
-
-            const top = new THREE.Mesh(tableTopGeo, tableMaterial(tableTopColorFor(ti), tableTopMaterials))
-            top.position.y = 1.5
-            top.castShadow = true
-            top.receiveShadow = true
-            group.add(top)
-            // The house desks keep the same silhouette and lighting, with pale
-            // furniture finishes plus a slim teal inlay and matching laptop marks.
-            if (houseDesk) {
-                const inlay = new THREE.Mesh(exhibitionInlayGeo, exhibitionAccentMat)
-                inlay.position.set(0, 1.632, -1.28)
-                group.add(inlay)
-            }
-            for (const [lx, lz] of [[-2.45, -1.2], [2.45, -1.2], [-2.45, 1.2], [2.45, 1.2]] as const) {
-                const leg = new THREE.Mesh(tableLegGeo, tableMaterial(tableLegColorFor(ti), tableLegMaterials, 0.85))
-                leg.position.set(lx, 0.72, lz)
-                leg.castShadow = true
-                group.add(leg)
-            }
-
-            // soft contact shadow to ground the table
-            const cShadow = new THREE.Mesh(contactShadowGeo, contactShadowMat)
-            cShadow.rotation.x = -Math.PI / 2
-            cShadow.scale.set(7.2, 4.6, 1)
-            cShadow.position.y = 0.011
-            group.add(cShadow)
-
-                // two glowing laptops per table, angled toward each long side
-                ;[[-1.25, 0.32, 1], [1.25, -0.32, -1]].forEach(([lx, lz, side], li) => {
-                    const base = new THREE.Mesh(laptopBaseGeo, laptopBodyMat)
-                    base.position.set(lx!, 1.65, lz!)
-                    base.rotation.y = side! > 0 ? 0.35 : Math.PI - 0.35
-                    group.add(base)
-                    if (houseDesk) {
-                        const accent = new THREE.Mesh(laptopAccentGeo, exhibitionAccentMat)
-                        accent.position.set(0, 0.037, side! * 0.15)
-                        base.add(accent)
-                    }
-                    const scr = new THREE.Mesh(laptopScreenGeo, laptopGlowMats[(ti + li) % laptopGlowMats.length]!)
-                    scr.position.set(lx!, 1.9, lz! - side! * 0.26)
-                    scr.rotation.y = side! > 0 ? 0.35 : Math.PI - 0.35
-                    scr.rotation.x = -0.28 * side!
-                    group.add(scr)
-                })
-
-            chairAt(group, 0, -2.15, Math.PI)
-            chairAt(group, 0, 2.15, 0)
-            chairAt(group, -3.3, 0, Math.PI / 2)
-            chairAt(group, 3.3, 0, -Math.PI / 2)
-
-            const hit = new THREE.Mesh(hitboxGeo, hitboxMat)
-            hit.position.y = 1.3
-            hit.userData.tableIdx = ti
-            group.add(hit)
-            tableHitboxes.push(hit)
-            screenOccluders.push(group)
-
-            scene.add(group)
-        })
-
-        // gold highlight square under the selected table
-        const highlight = new THREE.Mesh(
-            track(new THREE.PlaneGeometry(7.4, 4.9)),
-            track(new THREE.MeshBasicMaterial({ map: track(makeHighlightTexture()), transparent: true, depthWrite: false, toneMapped: false })),
-        )
-        highlight.rotation.x = -Math.PI / 2
-        highlight.position.y = 0.02
-        highlight.visible = false
-        scene.add(highlight)
-
-        // The proximity outline: what the interact button would answer right now.
-        // A 1x1 plane scaled per target, so one mesh serves a desk footprint and a
-        // plant's base alike. A character keeps the hover tag it already has, and
-        // the wall screen is up on the wall rather than on the floor, so neither
-        // gets an outline — this marks the things whose target is a floor patch.
-        const interactHighlight = new THREE.Mesh(
-            track(new THREE.PlaneGeometry(1, 1)),
-            track(new THREE.MeshBasicMaterial({
-                map: track(makeHighlightTexture()),
-                transparent: true,
-                depthWrite: false,
-                toneMapped: false,
-            })),
-        )
-        interactHighlight.rotation.x = -Math.PI / 2
-        interactHighlight.position.y = 0.03
-        interactHighlight.visible = false
-        scene.add(interactHighlight)
-
+        const { tableHitboxes, screenOccluders, highlight, interactHighlight, contactShadowTex } = buildFurniture(scene, { track, surfaceMaterial })
 
         // ------------------------------------------------------------ characters
 

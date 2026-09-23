@@ -222,19 +222,27 @@ music, the menu and chat panel, and the three games.
 
 ## The scene file
 
-`scene.ts` is 5,029 lines in one function. The deletions above take a large
-share out. What remains is split after the deletions, not before, so the
-split is a mechanical move of already-working code:
+`scene.ts` was 5,029 lines in one function. The deletions above took a
+large share out. What remained was split after the deletions, not before,
+so the split was a mechanical move of already-working code — and only of
+the parts that stand on their own. Everything that is built once and then
+left alone moved out; everything the frame loop, the input and the handle
+share state with stayed in the one closure, because threading a hundred
+locals through module boundaries is a rewrite, not a move.
 
 | Module | Owns |
 | --- | --- |
-| `scene/room.ts` | renderer, camera, lights, floor, walls, backdrop |
-| `scene/furniture.ts` | desks, plants, the hatch, the cabinet, the white desks |
-| `scene/characters.ts` | sprite meshes and sheets, the walk cycle, halos, bubbles |
-| `scene/agents.ts` | status to motion, followers, walk-in and walk-out |
-| `scene/wall.ts` | the screen texture: board and bulletin |
-| `scene/input.ts` | keys, touch, picking, the facing probe |
-| `scene/index.ts` | `createRoomScene` composing the above, `RoomSceneHandle` |
+| `scene/types.ts` | the public surface: `CreateRoomOptions`, `RoomSceneHandle`, `RoomAgentInput` |
+| `scene/layout.ts` | room dimensions, desk rows and columns, the px → world mapping |
+| `scene/textures.ts` | the canvas-drawn textures and the pixel-art loader |
+| `scene/wall-canvas.ts` | painting the wall: board and bulletin |
+| `scene/post-fx.ts` | exposure and the vignette-and-grain grade |
+| `scene/room-shell.ts` | carpet, glass walls, the tower beneath, aisle rugs |
+| `scene/big-screen.ts` | the wall screen's mesh, canvas texture and glows |
+| `scene/lighting.ts` | ambient, key, rim and the desk pools |
+| `scene/furniture.ts` | desks, chairs, laptops, hitboxes, the floor highlights |
+| `scene/primey.ts` | the mascot's billboard |
+| `scene.ts` | `createRoomScene`: characters, agents, followers, input, camera, the frame loop, the handle |
 
 ## Order of work
 
