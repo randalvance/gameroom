@@ -9,9 +9,6 @@
 const events = {
   "game_room.connected": "Game room client connected",
   "game_room.disconnected": "Game room client disconnected",
-  "game_room.presentation_drawn": "Gamemaster drew the presentation running order",
-  "game_room.winners_started": "Gamemaster started the winner announcement",
-  "game_room.winner_announced": "Gamemaster announced a podium place",
   "room3d.quality_reduced": "3D frame budget missed; reducing quality",
   "room3d.init_failed": "3D room failed to initialise",
   "room3d.cleanup_failed": "3D room cleanup threw",

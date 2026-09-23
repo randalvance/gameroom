@@ -14,7 +14,7 @@ import { wanderPos } from "~/lib/gameRoomNet/wander"
 import { objectSpeech, ROOM_OBJECTS, roomObjectIdx } from "~/lib/gameRoomNet/objects"
 import { PARTICIPANT_TABLES } from "~/components/gameRoom/constants"
 import { buildStaticColliders, movePlayer, pointBlocked } from "~/lib/gameRoomNet/collision"
-import { BULLETIN_MAX_LEN, CHAT_COOLDOWN_MS, DOORS_REFRESH_MS, GameRoomHub, guestSpawnPoint, introductionFor, type GuestUser } from "./hub"
+import { BULLETIN_MAX_LEN, CHAT_COOLDOWN_MS, GameRoomHub, guestSpawnPoint, introductionFor, type GuestUser } from "./hub"
 
 describe("guestSpawnPoint", () => {
   // The bug: the spawn band was a literal tuned for a shallower room, and once
@@ -89,14 +89,10 @@ const GUESTS: Record<string, GuestUser> = {
   "user-admin": { id: "user-admin", name: "Randal Cunanan", role: "admin", spriteId: 3, spriteSheet: null },
 }
 
-function makeHub(start = 1_000_000, opts: { opensAtMs?: number; teams?: TeamDTO[] } = {}) {
-  // The roster the hub reads, swappable the way the admin pages change it.
+function makeHub(start = 1_000_000, opts: { teams?: TeamDTO[] } = {}) {
+  // The roster the hub reads, swappable the way a host's pages change it.
   const roster = { teams: opts.teams ?? TEAMS }
   let now = start
-  // The doors: the default hub is one whose doors are open (every test above
-  // this option was written for the open room); a test of the pre-event room
-  // sets a time ahead, and can move it, the way the console can.
-  const doors = { opensAtMs: opts.opensAtMs ?? -Infinity }
   // A per-hub copy: tests that change a visitor's character must not leak that
   // into the next test's fixture.
   const guests: Record<string, GuestUser> = { ...GUESTS }
@@ -109,12 +105,10 @@ function makeHub(start = 1_000_000, opts: { opensAtMs?: number; teams?: TeamDTO[
     },
     now: () => now,
     autoTick: false,
-    loadOpensAtMs: async () => doors.opensAtMs,
   })
   return {
     hub,
     guests,
-    doors,
     roster,
     advance: (ms: number) => { now += ms },
     breakGuestLookup: () => { guestLookupFails = true },
@@ -804,55 +798,6 @@ describe("introductionFor", () => {
 // replay or an ad-hoc "lunch at 12:30" must not reach it, and no price impact
 // may fire off the back of one.
 
-describe("setScreenPage", () => {
-  it("leaves the wall to the players until the gamemaster takes it", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    expect((sink.frames[0]!.data as HelloEvent).screen).toBeNull()
-  })
-
-  it("pins one page on every connection in the room", async () => {
-    const { hub } = makeHub()
-    const ada = makeSink()
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", cyn.send)
-
-    hub.setScreenPage("leaderboard")
-
-    for (const sink of [ada, cyn]) {
-      expect(sink.frames.find((f) => f.event === "screen")?.data).toEqual({ page: "leaderboard" })
-    }
-  })
-
-  // A tab that opens (or an EventSource that reconnects) mid-force has missed
-  // the broadcast, and the room's screen would be the one wall in it showing
-  // something else.
-  it("tells a client that arrives mid-force which page is up", async () => {
-    const { hub } = makeHub()
-    hub.setScreenPage("leaderboard-lower")
-    const late = makeSink()
-    await hub.subscribe("user-ada", late.send)
-    expect((late.frames[0]!.data as HelloEvent).screen).toBe("leaderboard-lower")
-  })
-
-  it("hands the wall back to the players on release", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    hub.setScreenPage("countdown")
-    hub.setScreenPage(null)
-
-    const screens = sink.frames.filter((f) => f.event === "screen")
-    expect(screens.at(-1)?.data).toEqual({ page: null })
-
-    const late = makeSink()
-    await hub.subscribe("user-cyn", late.send)
-    expect((late.frames[0]!.data as HelloEvent).screen).toBeNull()
-  })
-})
-
 describe("setMusic", () => {
   it("leaves the music to the room's playlist until the gamemaster takes it", async () => {
     const { hub } = makeHub()
@@ -902,295 +847,6 @@ describe("setMusic", () => {
   })
 })
 
-describe("presentation running order", () => {
-  it("has no order until the gamemaster draws one", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    expect((sink.frames[0]!.data as HelloEvent).presentation).toBeNull()
-  })
-
-  it("stamps the draw with the reveal's clock and a nonce, and tells every screen", async () => {
-    const { hub } = makeHub(5_000_000)
-    const ada = makeSink()
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", cyn.send)
-
-    const state = hub.setPresentationOrder(["team-b", "team-a"])
-
-    expect(state).toEqual({
-      order: ["team-b", "team-a"],
-      revealedAt: 5_000_000,
-      nonce: 1,
-      spotlight: null,
-      done: [],
-    })
-    for (const sink of [ada, cyn]) {
-      expect(sink.frames.find((f) => f.event === "presentation")?.data).toEqual(state)
-    }
-  })
-
-  // The redraw everybody asks for when the first order puts the same team
-  // first again: same order, but the room must still run the reveal.
-  it("counts a redraw as a new reveal even when the order comes out the same", () => {
-    const { hub } = makeHub()
-    const first = hub.setPresentationOrder(["team-a", "team-b"])!
-    const again = hub.setPresentationOrder(["team-a", "team-b"])!
-    expect(again.nonce).toBeGreaterThan(first.nonce)
-  })
-
-  // A tab opened after the draw has missed the frame; hello carries the
-  // state so it shows the finished board rather than nothing.
-  it("tells a late arrival the order, and which team is on stage", async () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-b", "team-a"])
-    hub.setPresentationSpotlight("team-a")
-    const late = makeSink()
-    await hub.subscribe("user-ada", late.send)
-    expect((late.frames[0]!.data as HelloEvent).presentation).toMatchObject({
-      order: ["team-b", "team-a"],
-      spotlight: "team-a",
-    })
-  })
-
-  it("spotlights only a team that is in the running order", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    expect(hub.setPresentationSpotlight("team-a")).toBe(false) // nothing drawn yet
-    hub.setPresentationOrder(["team-a"])
-    expect(hub.setPresentationSpotlight("team-b")).toBe(false) // not presenting
-    expect(hub.setPresentationSpotlight("team-a")).toBe(true)
-    expect(hub.getPresentation()?.spotlight).toBe("team-a")
-    expect(hub.setPresentationSpotlight(null)).toBe(true)
-    expect(hub.getPresentation()?.spotlight).toBeNull()
-
-    const frames = sink.frames.filter((f) => f.event === "presentation")
-    expect(frames.map((f) => (f.data as { spotlight: string | null }).spotlight)).toEqual([null, "team-a", null])
-  })
-
-  it("takes the order down, spotlight and all, when presentations end", async () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationSpotlight("team-b")
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-
-    hub.setPresentationOrder(null)
-
-    expect(sink.frames.find((f) => f.event === "presentation")?.data).toBeNull()
-    expect(hub.getPresentation()).toBeNull()
-    const late = makeSink()
-    await hub.subscribe("user-cyn", late.send)
-    expect((late.frames[0]!.data as HelloEvent).presentation).toBeNull()
-  })
-
-  it("drops the spotlight on a redraw — the desk it pointed at may have moved", () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationSpotlight("team-b")
-    expect(hub.setPresentationOrder(["team-b", "team-a"])?.spotlight).toBeNull()
-  })
-})
-
-describe("marking a team off as presented", () => {
-  it("greens one team for the whole room, and nobody else", async () => {
-    const { hub } = makeHub()
-    const ada = makeSink()
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", cyn.send)
-    hub.setPresentationOrder(["team-a", "team-b"])
-
-    expect(hub.setPresentationDone("team-a", true)).toBe(true)
-
-    for (const sink of [ada, cyn]) {
-      expect(sink.frames.filter((f) => f.event === "presentation").at(-1)?.data).toMatchObject({
-        done: ["team-a"],
-      })
-    }
-  })
-
-  // Two presses of DONE is not two teams finished. A console that was
-  // double-clicked must leave the room looking the same as one that was not.
-  it("is idempotent", () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationDone("team-a", true)
-    hub.setPresentationDone("team-a", true)
-    expect(hub.getPresentation()?.done).toEqual(["team-a"])
-  })
-
-  it("puts a team back on the list", () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationDone("team-a", true)
-    hub.setPresentationDone("team-b", true)
-    expect(hub.setPresentationDone("team-a", false)).toBe(true)
-    expect(hub.getPresentation()?.done).toEqual(["team-b"])
-  })
-
-  // One press ends the slot: they have finished, so the light is not still
-  // on them.
-  it("drops the spotlight when the team on stage is marked off", () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationSpotlight("team-a")
-    hub.setPresentationDone("team-a", true)
-    expect(hub.getPresentation()).toMatchObject({ spotlight: null, done: ["team-a"] })
-  })
-
-  it("leaves the spotlight alone when a different team is marked off", () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationSpotlight("team-b")
-    hub.setPresentationDone("team-a", true)
-    expect(hub.getPresentation()?.spotlight).toBe("team-b")
-  })
-
-  it("refuses a team that is not in the running order, or no order at all", () => {
-    const { hub } = makeHub()
-    expect(hub.setPresentationDone("team-a", true)).toBe(false)
-    hub.setPresentationOrder(["team-a"])
-    expect(hub.setPresentationDone("team-b", true)).toBe(false)
-    expect(hub.getPresentation()?.done).toEqual([])
-  })
-
-  it("tells a late arrival who has already presented", async () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationDone("team-b", true)
-    const late = makeSink()
-    await hub.subscribe("user-ada", late.send)
-    expect((late.frames[0]!.data as HelloEvent).presentation).toMatchObject({ done: ["team-b"] })
-  })
-
-  it("starts a redraw with nobody marked off", () => {
-    const { hub } = makeHub()
-    hub.setPresentationOrder(["team-a", "team-b"])
-    hub.setPresentationDone("team-a", true)
-    expect(hub.setPresentationOrder(["team-b", "team-a"])?.done).toEqual([])
-  })
-})
-
-describe("the winners' ceremony", () => {
-  it("has no ceremony until the gamemaster starts one", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    expect((sink.frames[0]!.data as HelloEvent).winners).toBeNull()
-  })
-
-  it("starts with an empty podium, stamped with the clock, and tells every screen", async () => {
-    const { hub } = makeHub(5_000_000)
-    const ada = makeSink()
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", cyn.send)
-
-    const state = hub.startWinners()
-
-    expect(state).toEqual({ startedAt: 5_000_000, nonce: 1, podium: [] })
-    for (const sink of [ada, cyn]) {
-      expect(sink.frames.find((f) => f.event === "winners")?.data).toEqual(state)
-    }
-  })
-
-  it("reads the podium third, second, first — and refuses any other order", async () => {
-    const { hub, advance } = makeHub(1_000)
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    hub.startWinners()
-
-    expect(hub.announceWinner(1, "team-a")).toBe(false) // the winner is last, not first
-    expect(hub.announceWinner(2, "team-a")).toBe(false)
-    advance(500)
-    expect(hub.announceWinner(3, "team-a")).toBe(true)
-    expect(hub.announceWinner(3, "team-b")).toBe(false) // third is taken
-    expect(hub.announceWinner(1, "team-b")).toBe(false) // still not the winner's turn
-    expect(hub.announceWinner(2, "team-b")).toBe(true)
-
-    expect(hub.getWinners()).toEqual({
-      startedAt: 1_000,
-      nonce: 1,
-      podium: [
-        { place: 3, teamId: "team-a", announcedAt: 1_500 },
-        { place: 2, teamId: "team-b", announcedAt: 1_500 },
-      ],
-    })
-    const frames = sink.frames.filter((f) => f.event === "winners")
-    expect(frames.map((f) => (f.data as { podium: unknown[] }).podium.length)).toEqual([0, 1, 2])
-  })
-
-  // A team cannot be third AND first: the console offers only unplaced teams,
-  // but the hub is the authority and a stale console must not get through.
-  it("refuses a team that is already on the podium", () => {
-    const { hub } = makeHub()
-    hub.startWinners()
-    hub.announceWinner(3, "team-a")
-    expect(hub.announceWinner(2, "team-a")).toBe(false)
-    expect(hub.getWinners()?.podium).toHaveLength(1)
-  })
-
-  it("refuses an announcement with no ceremony running", () => {
-    const { hub } = makeHub()
-    expect(hub.announceWinner(3, "team-a")).toBe(false)
-    expect(hub.getWinners()).toBeNull()
-  })
-
-  it("has nothing more to announce once the winner is out", () => {
-    const { hub } = makeHub()
-    hub.startWinners()
-    hub.announceWinner(3, "team-a")
-    hub.announceWinner(2, "team-b")
-    expect(hub.announceWinner(1, "team-c")).toBe(true)
-    expect(hub.announceWinner(1, "team-d")).toBe(false)
-    expect(hub.getWinners()?.podium.map((entry) => entry.teamId)).toEqual(["team-a", "team-b", "team-c"])
-  })
-
-  // A tab opened mid-ceremony has missed the frames; hello carries the state
-  // so it lands on the podium as read so far.
-  it("tells a late arrival how far the ceremony has got", async () => {
-    const { hub } = makeHub()
-    hub.startWinners()
-    hub.announceWinner(3, "team-b")
-    const late = makeSink()
-    await hub.subscribe("user-ada", late.send)
-    expect((late.frames[0]!.data as HelloEvent).winners).toMatchObject({
-      nonce: 1,
-      podium: [{ place: 3, teamId: "team-b" }],
-    })
-  })
-
-  // A rehearsal and then the real thing: the same podium twice is still two
-  // ceremonies, each with its own fireworks.
-  it("starts over, with a new nonce, when started again", () => {
-    const { hub } = makeHub()
-    const first = hub.startWinners()
-    hub.announceWinner(3, "team-a")
-    const again = hub.startWinners()
-    expect(again.nonce).toBeGreaterThan(first.nonce)
-    expect(again.podium).toEqual([])
-  })
-
-  it("takes the ceremony down when it ends", async () => {
-    const { hub } = makeHub()
-    hub.startWinners()
-    hub.announceWinner(3, "team-a")
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-
-    hub.clearWinners()
-
-    expect(sink.frames.find((f) => f.event === "winners")?.data).toBeNull()
-    expect(hub.getWinners()).toBeNull()
-    const late = makeSink()
-    await hub.subscribe("user-cyn", late.send)
-    expect((late.frames[0]!.data as HelloEvent).winners).toBeNull()
-  })
-})
-
 describe("sendBulletin", () => {
   it("puts the gamemaster's message on every screen in the room", async () => {
     const { hub } = makeHub()
@@ -1199,25 +855,14 @@ describe("sendBulletin", () => {
     await hub.subscribe("user-ada", ada.send)
     await hub.subscribe("user-cyn", cyn.send)
 
-    hub.sendBulletin("Lunch is served in the atrium.", "")
+    hub.sendBulletin("Lunch is served in the atrium.")
 
     for (const sink of [ada, cyn]) {
       const bulletin = sink.frames.find((f) => f.event === "bulletin")
       expect(bulletin?.data).toMatchObject({
         message: "Lunch is served in the atrium.",
-        affectedSymbol: "",
       })
     }
-  })
-
-  it("upper-cases the affected symbol, the way the exchange's own feed reads", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-    hub.sendBulletin("Rumour mill spinning.", " drft ")
-    expect(sink.frames.find((f) => f.event === "bulletin")?.data).toMatchObject({
-      affectedSymbol: "DRFT",
-    })
   })
 
   // The room draws this across three lines of a canvas; an unbounded paste
@@ -1226,7 +871,7 @@ describe("sendBulletin", () => {
     const { hub } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    hub.sendBulletin("x".repeat(BULLETIN_MAX_LEN + 50), "")
+    hub.sendBulletin("x".repeat(BULLETIN_MAX_LEN + 50))
     const { message } = sink.frames.find((f) => f.event === "bulletin")!.data as { message: string }
     expect(message).toHaveLength(BULLETIN_MAX_LEN)
   })
@@ -1235,35 +880,19 @@ describe("sendBulletin", () => {
     const { hub } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    expect(hub.sendBulletin("   ", "")).toBeNull()
+    expect(hub.sendBulletin("   ")).toBeNull()
     expect(sink.frames.some((f) => f.event === "bulletin")).toBe(false)
   })
 
-  // The nonce is how the admin's room asks for the spoken audio afterwards, so
-  // the caller that generated it has to learn which one this send got.
-  it("reports the nonce it stamped, so the audio can be filed under it", async () => {
+  it("reports the nonce it stamped", async () => {
     const { hub } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
 
-    const nonce = hub.sendBulletin("Lunch at 12:30.", "")
+    const nonce = hub.sendBulletin("Lunch at 12:30.")
 
     const frame = sink.frames.find((f) => f.event === "bulletin")!.data as { nonce: number }
     expect(nonce).toBe(frame.nonce)
-  })
-
-  // How long the read takes. Every client holds the banner and the camera for
-  // it, so it travels to the whole room even though only the admin hears it.
-  it("carries the length of the spoken read to the whole room", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-
-    hub.sendBulletin("Lunch at 12:30.", "", { speechMs: 8_400 })
-
-    expect(sink.frames.find((f) => f.event === "bulletin")?.data).toMatchObject({
-      speechMs: 8_400,
-    })
   })
 
   it("carries the hold the gamemaster asked for", async () => {
@@ -1271,30 +900,19 @@ describe("sendBulletin", () => {
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
 
-    hub.sendBulletin("Lunch at 12:30.", "", { holdMs: 30_000 })
+    hub.sendBulletin("Lunch at 12:30.", { holdMs: 30_000 })
 
     expect(sink.frames.find((f) => f.event === "bulletin")?.data).toMatchObject({ holdMs: 30_000 })
   })
 
-  it("leaves the length out when there is no voice to wait for", async () => {
-    const { hub } = makeHub()
-    const sink = makeSink()
-    await hub.subscribe("user-ada", sink.send)
-
-    hub.sendBulletin("Lunch at 12:30.", "")
-
-    const frame = sink.frames.find((f) => f.event === "bulletin")!.data as Record<string, unknown>
-    expect(frame.speechMs ?? null).toBeNull()
-  })
-
-  // Replaying ME1 twice — a rehearsal, then the real thing — must raise the
-  // banner twice, and the client can only tell those apart by the nonce.
+  // Sending the same text twice must raise the banner twice, and the client
+  // can only tell those apart by the nonce.
   it("stamps each send with its own nonce, so a repeat still plays", async () => {
     const { hub } = makeHub()
     const sink = makeSink()
     await hub.subscribe("user-ada", sink.send)
-    hub.sendBulletin("BREAKING: sanctions imposed.", "AXON")
-    hub.sendBulletin("BREAKING: sanctions imposed.", "AXON")
+    hub.sendBulletin("Five minutes to lunch.")
+    hub.sendBulletin("Five minutes to lunch.")
     const nonces = sink.frames
       .filter((f) => f.event === "bulletin")
       .map((f) => (f.data as { nonce: number }).nonce)
@@ -1302,252 +920,32 @@ describe("sendBulletin", () => {
     expect(nonces[1]).not.toBe(nonces[0])
   })
 
-  // Unlike the forced page, a bulletin is a moment rather than a state: a
-  // reconnect five minutes later must not replay a banner the room has long
-  // since finished reading.
+  // A bulletin is a moment rather than a state: a reconnect five minutes
+  // later must not replay a banner the room has long since finished reading.
   it("is not replayed to a client that connects afterwards", async () => {
     const { hub } = makeHub()
-    hub.sendBulletin("BREAKING: sanctions imposed.", "AXON")
+    hub.sendBulletin("Five minutes to lunch.")
     const late = makeSink()
     await hub.subscribe("user-ada", late.send)
     expect(late.frames.some((f) => f.event === "bulletin")).toBe(false)
   })
 })
 
-// Before the doors open the room is somewhere to wait with your OWN team:
-// a student's connection carries their desk and the staff, and nothing from
-// any other team — not their names, not their chat, not their positions. The
-// hub decides, not the page, so a client reading the stream by hand learns
-// no more than the room shows. Staff see the whole room throughout.
-describe("before the doors open", () => {
-  const DOORS_IN_MS = 60 * 60 * 1000
+describe("roster changes", () => {
   const START = 1_000_000
 
-  it("greets a student with their own desk and the staff, not the other teams", async () => {
-    const { hub } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    await hub.subscribe("user-admin", makeSink().send)
-    const cyn = makeSink()
-    await hub.subscribe("user-cyn", cyn.send)
-    const ada = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-
-    const hello = ada.frames[0]!.data as HelloEvent
-    expect(hello.you).toBe(0)
-    expect(hello.roster.map((entry) => entry.id)).toEqual(["user-ada", "user-bob", "user-admin"])
-    // Cynthia (idx 2) is live at her desk, but not in Ada's snapshot or
-    // wander state; the admin (idx 3), live on the floor, is.
-    expect(statesOf(ada.frames[0]!).map((s) => s.idx)).toEqual([0, 3])
-    expect(wandersOf(ada.frames[0]!).map((w) => w.idx)).toEqual([1])
-  })
-
-  it("still shows the staff the whole room", async () => {
-    const { hub } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    const admin = makeSink()
-    await hub.subscribe("user-admin", admin.send)
-    const hello = admin.frames[0]!.data as HelloEvent
-    expect(hello.roster.map((entry) => entry.id)).toEqual(["user-ada", "user-bob", "user-cyn", "user-admin"])
-  })
-
-  it("delivers a student's chat to their teammates and the staff, and to no other team", async () => {
-    const { hub } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    const sinks = { ada: makeSink(), bob: makeSink(), cyn: makeSink(), admin: makeSink() }
-    await hub.subscribe("user-ada", sinks.ada.send)
-    await hub.subscribe("user-bob", sinks.bob.send)
-    await hub.subscribe("user-cyn", sinks.cyn.send)
-    await hub.subscribe("user-admin", sinks.admin.send)
-
-    expect(hub.handleChat("user-ada", "gm team")).toEqual({ ok: true })
-    const heard = (sink: ReturnType<typeof makeSink>) => sink.frames.some((f) => f.event === "chat")
-    expect(heard(sinks.ada)).toBe(true)
-    expect(heard(sinks.bob)).toBe(true)
-    expect(heard(sinks.admin)).toBe(true)
-    expect(heard(sinks.cyn)).toBe(false)
-  })
-
-  it("delivers the staff's chat to every team", async () => {
-    const { hub } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    const ada = makeSink()
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", cyn.send)
-    await hub.subscribe("user-admin", makeSink().send)
-
-    expect(hub.handleChat("user-admin", "welcome, everyone")).toEqual({ ok: true })
-    for (const sink of [ada, cyn]) {
-      expect(sink.frames.find((f) => f.event === "chat")?.data).toMatchObject({ text: "welcome, everyone" })
-    }
-  })
-
-  it("announces a student's arrival to their team and the staff only", async () => {
-    const { hub } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    const ada = makeSink()
-    const cyn = makeSink()
-    const admin = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", cyn.send)
-    await hub.subscribe("user-admin", admin.send)
-
-    const detach = await hub.subscribe("user-bob", makeSink().send)
-    detach()
-    const joinedBob = (sink: ReturnType<typeof makeSink>, event: string) =>
-      sink.frames.some((f) => f.event === event && (f.data as { idx: number }).idx === 1)
-    expect(joinedBob(ada, "join")).toBe(true)
-    expect(joinedBob(ada, "leave")).toBe(true)
-    expect(joinedBob(admin, "join")).toBe(true)
-    expect(joinedBob(cyn, "join")).toBe(false)
-    expect(joinedBob(cyn, "leave")).toBe(false)
-  })
-
-  it("streams a student only the positions of the characters they can see", async () => {
-    const { hub, advance } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    const ada = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-cyn", makeSink().send)
-    advance(SNAPSHOT_INTERVAL_MS)
-    hub.tick()
-
-    const snapshot = ada.frames.filter((f) => f.event === "snapshot").at(-1)!
-    expect(statesOf(snapshot).map((s) => s.idx)).toEqual([0])
-    const wanders = ada.frames.filter((f) => f.event === "wander").flatMap(wandersOf)
-    expect(wanders.every((w) => w.idx === 1)).toBe(true)
-  })
-
-  it("refuses a conversation across teams, as if the other student were not there", async () => {
-    const { hub, advance } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    await hub.subscribe("user-ada", makeSink().send)
-    const cynSink = makeSink()
-    await hub.subscribe("user-cyn", cynSink.send)
-    const cyn = hub.charForUser("user-cyn")!
-    advance(60_000)
-    // Right beside Cynthia: in range, were she visible.
-    hub.handleInput("user-ada", { x: cyn.x + 20, y: cyn.y, dir: 3, moving: false })
-
-    expect(hub.handleInteract("user-ada", cyn.idx)).toEqual({ ok: false, error: "NO_TARGET" })
-    expect(cynSink.frames.some((f) => f.event === "say")).toBe(false)
-  })
-
-  it("opens the room to everyone the moment the doors open, without a reconnect", async () => {
-    const { hub, advance } = makeHub(START, { opensAtMs: START + 5_000 })
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", makeSink().send)
-    await hub.subscribe("user-cyn", cyn.send)
-
-    expect(hub.handleChat("user-ada", "before").ok).toBe(true)
-    expect(cyn.frames.some((f) => f.event === "chat")).toBe(false)
-
-    advance(5_000)
-    expect(hub.handleChat("user-ada", "after").ok).toBe(true)
-    expect(cyn.frames.find((f) => f.event === "chat")?.data).toMatchObject({ text: "after" })
-  })
-
-  it("picks up the organizers moving the doors, on the tick cadence", async () => {
-    const { hub, advance, doors } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    const cyn = makeSink()
-    await hub.subscribe("user-ada", makeSink().send)
-    await hub.subscribe("user-cyn", cyn.send)
-
-    // The console opens the doors now.
-    doors.opensAtMs = START
-    advance(DOORS_REFRESH_MS)
-    hub.tick()
-    await new Promise((resolve) => setTimeout(resolve, 0))
-
-    expect(hub.handleChat("user-ada", "doors are open").ok).toBe(true)
-    expect(cyn.frames.find((f) => f.event === "chat")?.data).toMatchObject({ text: "doors are open" })
-  })
-
-  // A deskless student used to count as staff: drawn in, and heard by, every
-  // team's room — a one-way channel into all of them.
-  it("keeps a student with no desk out of every team's room, alone with the staff", async () => {
-    const { hub, guests } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "student", spriteId: null, spriteSheet: null }
-    const ada = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    await hub.subscribe("user-admin", makeSink().send)
-    const dee = makeSink()
-    await hub.subscribe("user-dee", dee.send)
-
-    // Dee sees themselves and the staff, nobody seated.
-    const hello = dee.frames[0]!.data as HelloEvent
-    expect(hello.roster.map((entry) => entry.id)).toEqual(["user-admin", "user-dee"])
-    expect(hello.you).toBe(4)
-    // Ada never hears Dee arrive, and a late hello leaves Dee out.
-    expect(ada.frames.some((f) => f.event === "join" && (f.data as { idx: number }).idx === 4)).toBe(false)
-    const late = makeSink()
-    await hub.subscribe("user-bob", late.send)
-    expect((late.frames[0]!.data as HelloEvent).roster.some((entry) => entry.id === "user-dee")).toBe(false)
-
-    // Dee's chat reaches the staff and themselves, no team.
-    const admin = makeSink()
-    await hub.subscribe("user-admin", admin.send)
-    expect(hub.handleChat("user-dee", "hello?")).toEqual({ ok: true })
-    expect(dee.frames.some((f) => f.event === "chat")).toBe(true)
-    expect(admin.frames.some((f) => f.event === "chat")).toBe(true)
-    expect(ada.frames.some((f) => f.event === "chat")).toBe(false)
-    expect(late.frames.some((f) => f.event === "chat")).toBe(false)
-  })
-
-  it("keeps two deskless students apart", async () => {
-    const { hub, guests } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "student", spriteId: null, spriteSheet: null }
-    guests["user-eve"] = { id: "user-eve", name: "Eve Ong", role: "student", spriteId: null, spriteSheet: null }
-    const dee = makeSink()
-    await hub.subscribe("user-dee", dee.send)
-    const eve = makeSink()
-    await hub.subscribe("user-eve", eve.send)
-
-    expect((eve.frames[0]!.data as HelloEvent).roster.map((entry) => entry.id)).toEqual(["user-eve"])
-    expect(dee.frames.some((f) => f.event === "join")).toBe(false)
-    expect(hub.handleChat("user-eve", "anyone?")).toEqual({ ok: true })
-    expect(dee.frames.some((f) => f.event === "chat")).toBe(false)
-  })
-
-  it("shows the deskless viewer on the big screen the whole room, without showing it to anyone", async () => {
-    const { hub, guests } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "student", spriteId: null, spriteSheet: null }
-    guests["user-screen"] = { id: "user-screen", name: "Big Screen", role: "viewer", spriteId: null, spriteSheet: null }
-    const ada = makeSink()
-    await hub.subscribe("user-ada", ada.send)
-    const dee = makeSink()
-    await hub.subscribe("user-dee", dee.send)
-    const screen = makeSink()
-    await hub.subscribe("user-screen", screen.send)
-
-    const roster = (screen.frames[0]!.data as HelloEvent).roster.map((entry) => entry.id)
-    expect(roster).toEqual(expect.arrayContaining(["user-ada", "user-dee", "user-screen"]))
-    // Watching is not a channel in: nobody on the floor sees or hears it.
-    expect(ada.frames.some((f) => f.event === "join")).toBe(false)
-    expect(dee.frames.some((f) => f.event === "join")).toBe(false)
-    expect(hub.handleChat("user-screen", "hello room")).toEqual({ ok: true })
-    expect(ada.frames.some((f) => f.event === "chat")).toBe(false)
-    expect(dee.frames.some((f) => f.event === "chat")).toBe(false)
-  })
-
-  it("keeps a seated participant whose role was never promoted to their own team", async () => {
-    const { hub, guests } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
-    // Cynthia sits at TEAM 02, but her users.role still says "viewer".
-    guests["user-cyn"] = { id: "user-cyn", name: "Cynthia Lee", role: "viewer", spriteId: null, spriteSheet: null }
-    await hub.subscribe("user-ada", makeSink().send)
-    const cyn = makeSink()
-    await hub.subscribe("user-cyn", cyn.send)
-
-    expect((cyn.frames[0]!.data as HelloEvent).roster.map((entry) => entry.id)).toEqual(["user-cyn"])
-    expect(hub.handleChat("user-ada", "team a only")).toEqual({ ok: true })
-    expect(cyn.frames.some((f) => f.event === "chat")).toBe(false)
-  })
-
-  it("seats a student who first arrived before the roster had them, instead of leaving them a guest", async () => {
+  it("seats a visitor who first arrived before the roster had them, instead of leaving them a guest", async () => {
     const withoutDee = TEAMS
     const withDee: TeamDTO[] = [
       TEAMS[0]!,
       { ...TEAMS[1]!, players: [...TEAMS[1]!.players, { id: "user-dee", name: "Dee Ng", spriteId: null, spriteSheet: null }] },
     ]
-    const { hub, guests, roster, advance } = makeHub(START, { opensAtMs: START + DOORS_IN_MS, teams: withoutDee })
+    const { hub, guests, roster, advance } = makeHub(START, { teams: withoutDee })
     guests["user-dee"] = { id: "user-dee", name: "Dee Ng", role: "student", spriteId: null, spriteSheet: null }
     await hub.subscribe("user-ada", makeSink().send)
 
-    // Seated on the admin page just before Dee connects — but inside the
-    // reload window, so the hub meets Dee as a visitor.
+    // Seated by the host just before Dee connects — but inside the reload
+    // window, so the hub meets Dee as a visitor.
     roster.teams = withDee
     advance(1_000)
     const first = makeSink()
@@ -1558,38 +956,28 @@ describe("before the doors open", () => {
 
     // Their next connection finds them at TEAM 02's desk, same character.
     advance(5_000)
-    const cyn = makeSink()
-    await hub.subscribe("user-cyn", cyn.send)
     const second = makeSink()
     await hub.subscribe("user-dee", second.send)
     const dee = hub.charForUser("user-dee")!
     expect(dee).toMatchObject({ idx: deeIdx, guest: false, teamIdx: 1, team: "TEAM 02" })
     const hello = second.frames[0]!.data as HelloEvent
-    expect(hello.roster.map((entry) => entry.id)).toEqual(["user-cyn", "user-dee"])
     expect(hello.roster.find((entry) => entry.id === "user-dee")!.guest).toBeUndefined()
-    expect(hub.handleChat("user-dee", "made it")).toEqual({ ok: true })
-    expect(cyn.frames.some((f) => f.event === "chat")).toBe(true)
   })
 
-  it("moves a reseated student into their new team's room", async () => {
+  it("moves a reseated member to their new desk", async () => {
     const moved: TeamDTO[] = [
       { ...TEAMS[0]!, players: [TEAMS[0]!.players[1]!] },
       { ...TEAMS[1]!, players: [...TEAMS[1]!.players, TEAMS[0]!.players[0]!] },
     ]
-    const { hub, roster, advance } = makeHub(START, { opensAtMs: START + DOORS_IN_MS })
+    const { hub, roster, advance } = makeHub(START)
     const leave = await hub.subscribe("user-ada", makeSink().send)
     leave()
 
     roster.teams = moved
     advance(30_000)
-    const bob = makeSink()
-    await hub.subscribe("user-bob", bob.send)
     const ada = makeSink()
     await hub.subscribe("user-ada", ada.send)
 
     expect(hub.charForUser("user-ada")).toMatchObject({ teamIdx: 1, team: "TEAM 02" })
-    expect((ada.frames[0]!.data as HelloEvent).roster.map((entry) => entry.id)).toEqual(["user-ada", "user-cyn"])
-    expect(hub.handleChat("user-bob", "bye ada")).toEqual({ ok: true })
-    expect(ada.frames.some((f) => f.event === "chat")).toBe(false)
   })
 })

@@ -14,9 +14,6 @@ import type { FlatPlayer } from "~/lib/event-types"
 import { track } from "~/lib/analytics"
 import { facingForInput } from "~/lib/gameRoomNet/collision"
 import { OBJECT_IDX_BASE } from "~/lib/gameRoomNet/objects"
-import type { ScreenPage } from "./screen-pages"
-import type { PresentationState } from "~/lib/presentation-order"
-import type { WinnersState } from "~/lib/winners-ceremony"
 import {
   unpackState,
   unpackWander,
@@ -30,9 +27,7 @@ import {
   type JoinEvent,
   type LeaveEvent,
   type MusicEvent,
-  type PresentationEvent,
   type RosterEntryDTO,
-  type WinnersEvent,
   type SayEvent,
   type SnapshotEntry,
 } from "~/lib/gameRoomNet/protocol"
@@ -96,11 +91,6 @@ export interface GameRoomNet {
   /** Post a chat message; it comes back on the stream as a `chat` event. */
   sendChat: (text: string) => void
   /**
-   * The page the gamemaster has pinned the wall screen to, or null while the
-   * players still turn it themselves.
-   */
-  forcedScreenPage: ScreenPage | null
-  /**
    * The last bulletin the gamemaster pushed straight at the room, or null if
    * there has not been one this connection. Carries a nonce, because two
    * identical sends — a rehearsal and then the real thing — are otherwise
@@ -108,21 +98,9 @@ export interface GameRoomNet {
    */
   bulletin: BulletinEvent | null
   /**
-   * The presentation running order the gamemaster has drawn, with the team
-   * under the spotlight, or null until there is one. State like the pinned
-   * page: hello carries it, so a reconnect lands on the finished board.
-   */
-  presentation: PresentationState | null
-  /**
-   * The winners' ceremony the gamemaster is running, with the places read so
-   * far, or null. State like the running order: hello carries it, so a
-   * reconnect lands on the podium as it stands.
-   */
-  winners: WinnersState | null
-  /**
    * What the gamemaster has put on the PA screens' music — a looping track,
-   * silence, or null for the room's own playlist. State like the pinned page:
-   * hello carries it. Whether THIS screen obeys it is the room's call, by role.
+   * silence, or null for the room's own playlist. State: hello carries it.
+   * Whether THIS screen obeys it is the room's call, by role.
    */
   music: RoomMusic
 }
@@ -170,10 +148,7 @@ export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
   // Chat survives reconnects on purpose: the stream is this client's memory
   // of the room, and a server blip shouldn't blank it.
   const [chatLog, setChatLog] = useState<GameRoomChatLine[]>([])
-  const [forcedScreenPage, setForcedScreenPage] = useState<ScreenPage | null>(null)
   const [bulletin, setBulletin] = useState<BulletinEvent | null>(null)
-  const [presentation, setPresentation] = useState<PresentationState | null>(null)
-  const [winners, setWinners] = useState<WinnersState | null>(null)
   const [music, setMusic] = useState<RoomMusic>(null)
   const chatSeqRef = useRef(0)
   const dialogRef = useRef<GameRoomDialog | null>(null)
@@ -334,10 +309,7 @@ export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
       setMyPlayerIdx(s.myIdx === null ? null : s.idxToPlayerIdx.get(s.myIdx) ?? null)
       syncGuests()
       setOnlineCount(countLive(hello.states))
-      setForcedScreenPage(hello.screen ?? null)
       setBackroomsUnlocked(hello.backroomsUnlocked === true)
-      setPresentation(hello.presentation ?? null)
-      setWinners(hello.winners ?? null)
       setMusic(hello.music ?? null)
       setConnected(true)
       applySession()
@@ -398,31 +370,13 @@ export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
       // Ignore older servers' broadcast conversations; only their reader sees them.
     })
 
-    // The wall screen the gamemaster has taken. Set from hello too: a forced
-    // page is state, and a reconnect replays hello rather than the screen
-    // frame that came before it.
-    on<{ page: ScreenPage | null }>("screen", ({ page }) => {
-      setForcedScreenPage(page)
-    })
-
-    // A bulletin, on the other hand, is a moment: nothing replays it, and the
-    // room's banner is raised by the arrival rather than by the content.
+    // A bulletin is a moment: nothing replays it, and the room's banner is
+    // raised by the arrival rather than by the content.
     on<BulletinEvent>("bulletin", (data) => {
       setBulletin(data)
     })
 
-    // The running order is state too — the whole of it each time, so a
-    // spotlight never arrives without the order it points into.
-    on<PresentationEvent>("presentation", (data) => {
-      setPresentation(data)
-    })
-
-    // And the ceremony: whole state, every frame, like the order.
-    on<WinnersEvent>("winners", (data) => {
-      setWinners(data)
-    })
-
-    // And the PA screens' music: whole state, like the page.
+    // The PA screens' music: whole state, every frame.
     on<MusicEvent>("music", (data) => {
       setMusic(data)
     })
@@ -542,5 +496,5 @@ export function useGameRoomNet(allPlayers: FlatPlayer[]): GameRoomNet {
     })
   }, [closeDialog])
 
-  return { onSceneReady, onSelfState, onInteract, onlineCount, myPlayerIdx, guests, connected, dialog, dismissDialog, chatLog, sendChat, forcedScreenPage, bulletin, presentation, winners, music, backroomsUnlocked }
+  return { onSceneReady, onSelfState, onInteract, onlineCount, myPlayerIdx, guests, connected, dialog, dismissDialog, chatLog, sendChat, bulletin, music, backroomsUnlocked }
 }

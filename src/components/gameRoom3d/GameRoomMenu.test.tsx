@@ -8,8 +8,6 @@ import { GameRoomMenu } from "./GameRoomMenu"
 import { GRAPHICS_PREFERENCE_KEY, type GraphicsPreference } from "./quality-tier"
 
 // vi.mock factories are hoisted above module scope — the spy must be too.
-const { getExLeaderboardFn } = vi.hoisted(() => ({ getExLeaderboardFn: vi.fn() }))
-vi.mock("~/server/exchange", () => ({ getExLeaderboardFn: () => getExLeaderboardFn() }))
 
 vi.mock("~/components/SiteAudio", () => ({
   SiteAudioControls: () => (
@@ -406,45 +404,25 @@ describe("GameRoomMenu", () => {
 })
 
 
-describe("GameRoomMenu team standings", () => {
-  beforeEach(() => {
-    getExLeaderboardFn.mockReset()
-    getExLeaderboardFn.mockResolvedValue([
-      { label: "TEAM BETA", teamId: "t1", totalValue: 10500, totalPnL: 500 },
-      { label: "TEAM ALPHA", teamId: "t0", totalValue: 10120, totalPnL: 120 },
-    ])
-  })
-
-  it("shows your own team's rank, value and P&L beside your teammates", async () => {
+describe("GameRoomMenu team section", () => {
+  it("shows your teammates", () => {
     render(<Harness teams={TEAMS} startOpen />)
     fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
     expect(screen.getByText("Lin")).toBeTruthy()
-    await waitFor(() => expect(screen.getByTestId("team-stats-rank").textContent).toBe("#2"))
-    expect(screen.getByTestId("team-stats-value").textContent).toContain("10,120")
-    expect(screen.getByTestId("team-stats-pnl").textContent).toContain("120")
   })
 
-  it("shows the desk's team instead when one is in focus, and opens on Team", async () => {
+  it("shows the desk's team instead when one is in focus, and opens on Team", () => {
     render(<Harness teams={TEAMS} focusTeamIdx={1} startOpen />)
     expect(screen.getByRole("heading", { name: "Team" })).toBeTruthy()
     expect(screen.getByText("TEAM BETA")).toBeTruthy()
     expect(screen.getByText("Rui")).toBeTruthy()
     expect(screen.queryByText("Lin")).toBeNull()
-    await waitFor(() => expect(screen.getByTestId("team-stats-rank").textContent).toBe("#1"))
   })
 
-  it("marks the focused team with its own colour, the one /results gives it", () => {
+  it("marks the focused team with its own colour", () => {
     render(<Harness teams={TEAMS} focusTeamIdx={1} startOpen />)
     const swatch = screen.getByTestId("team-swatch")
     expect(swatch.style.background).toBe(hexToRgb(teamColor("TEAM BETA")))
-  })
-
-  it("keeps the roster when the standings cannot be read", async () => {
-    getExLeaderboardFn.mockRejectedValue(new Error("EXCHANGE: down"))
-    render(<Harness teams={TEAMS} startOpen />)
-    fireEvent.click(screen.getByRole("menuitem", { name: "Team" }))
-    await waitFor(() => expect(screen.getByText("STANDINGS UNAVAILABLE")).toBeTruthy())
-    expect(screen.getByText("Lin")).toBeTruthy()
   })
 })
 

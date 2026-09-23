@@ -31,35 +31,23 @@ import { tableInteractAction } from "~/lib/table-interact-action"
 import { createRoomArcadeCues, type RoomArcadeCues } from "~/components/arcade/room-cues"
 import { RotateToLandscape, useCoarsePointer, useIsPortrait } from "~/components/gameRoom3d/TouchControls"
 import { useGameRoomNet } from "~/components/gameRoom3d/useGameRoomNet"
-import { useMarketNews } from "~/components/gameRoom3d/useMarketNews"
-import { useMarketNewsPrewarm } from "~/components/gameRoom3d/useMarketNewsPrewarm"
-import { useAnnouncementVoice } from "~/components/gameRoom3d/useAnnouncementVoice"
-import { useSessionClock } from "~/components/gameRoom3d/useSessionClock"
-import { useDoors } from "~/components/gameRoom3d/useDoors"
-import { EVENT_OVER_SCREEN, doorsCountdown } from "~/components/gameRoom3d/session-screen"
+import { useBulletin, type RoomBulletin } from "~/components/gameRoom3d/useBulletin"
+import type { RoomBoard } from "~/components/gameRoom3d/wall"
 import { GameRoomChatPanel } from "~/components/gameRoom3d/GameRoomChatPanel"
 import { GameRoomDialogBox } from "~/components/gameRoom3d/GameRoomDialogBox"
 import type { GameRoomDialog } from "~/components/gameRoom3d/useGameRoomNet"
 import { GameRoomMenu } from "~/components/gameRoom3d/GameRoomMenu"
-import { PresentationBanner } from "~/components/gameRoom3d/PresentationBanner"
-import { WinnersBanner } from "~/components/gameRoom3d/WinnersBanner"
 import type { RoomSceneHandle } from "~/components/gameRoom3d/scene"
 import { usePageMusic, useSiteAudio } from "~/components/SiteAudio"
 import { roomMusicRequest } from "~/lib/game-room-music"
 import { createKonamiDetector, konamiTokenForKey } from "~/lib/konami"
 import { track } from "~/lib/analytics"
 import { buildAllPlayers, type TeamDTO } from "~/lib/event-types"
-import type { ExLeaderboardRow } from "~/lib/exchange-types"
 import { useSnapMic } from "~/components/gameRoom3d/useSnapMic"
 import type { GameRoomMenuData } from "~/lib/game-room-menu"
-import { getExLeaderboardFn } from "~/server/exchange"
-import { openDoors, type StudentAccessView } from "~/server/student-access"
 
 /** How long Primey's line stays up when you press interact on it. */
 const PRIMEY_DIALOG_MS = 4200
-
-/** How often the wall screen's standings are refreshed. */
-const LEADERBOARD_POLL_MS = 15_000
 
 export interface GameRoomProps {
   /** Who is playing. `role` decides crowns, PA music and what the menu offers. */
@@ -68,12 +56,12 @@ export interface GameRoomProps {
   teams: TeamDTO[]
   /** What the pause menu shows: you, and the people it lists beside you. */
   menu: GameRoomMenuData
-  /**
-   * When the room opens. Before it the room is a WAITING room: the wall counts
-   * down, the desks carry no placings and the price strip is off. Omit for a
-   * room that is simply open.
-   */
-  doors?: StudentAccessView
+  /** The wall's resting page: a title and a few lines. Omit for the room's
+   * title alone. */
+  board?: RoomBoard | null
+  /** A bulletin for the wall: it goes up for its hold, and every camera in
+   * the room turns to read it. Hand in a new object to raise it again. */
+  bulletin?: RoomBulletin | null
   /** The arcade cabinet was unlocked on an earlier visit: it is already there,
    * with no drop-in entrance. */
   arcadeUnlocked?: boolean
@@ -86,38 +74,21 @@ export interface GameRoomProps {
   onExit?: () => void
   /** Rendered above the room — your own header, ticker or nothing at all. */
   header?: React.ReactNode
-  /**
-   * Listen to an exchange price feed (`/api/prices/stream`) for scripted market
-   * announcements, which take over the wall screen. Off by default: nothing in
-   * this library serves that feed, and a room with no exchange behind it
-   * should not sit holding a dead EventSource open.
-   */
-  marketFeed?: boolean
 }
 
 export function GameRoom({
   me,
   teams,
   menu,
-  doors: initialDoors,
+  board = null,
+  bulletin = null,
   arcadeUnlocked = false,
   onArcadeUnlock,
   onDuelWin,
   onExit,
   header,
-  marketFeed = false,
 }: GameRoomProps) {
   const { playSfx, suspendMusic, effectsVolume, musicMuted, musicVolume } = useSiteAudio()
-  // Before the doors open the room is a waiting room: the wall counts to the
-  // doors, the desks carry no placings, the strip is off.
-  const doors = useDoors(useMemo(() => initialDoors ?? openDoors(), [initialDoors]))
-  const preEvent = doors.preEvent
-
-  // The screen that plays filmed clips and speaks announcements: the big screen
-  // or the laptop driving the projector and the PA. Only that screen warms the
-  // clips.
-  const playsClips = me.role === "admin" || me.role === "viewer"
-  useMarketNewsPrewarm(playsClips)
   const allPlayers = useMemo(() => buildAllPlayers(teams), [teams])
 
   const [menuOpen, setMenuOpen] = useState(false)
@@ -151,24 +122,15 @@ export function GameRoom({
   // The room's alternating playlist — unless the gamemaster has put one track
   // on, or stopped the music, and this is a PA screen (admin or viewer).
   usePageMusic(roomMusicRequest(net.music, me.role))
-  const marketNews = useMarketNews(() => playSfx("news"), net.bulletin, playsClips, marketFeed)
-  // A filmed broadcast has a presenter talking over the whole clip, so the
-  // room's playlist STOPS for it and starts again when the wall clears. The
-  // three overlay games each bring their own soundtrack, so it stops for those
-  // too.
-  const broadcasting = marketNews?.clip != null
+  // The wall's bulletin, from the host's prop or the gamemaster's console.
+  const bulletinText = useBulletin(bulletin, net.bulletin, () => playSfx("news"))
+  // The three overlay games each bring their own soundtrack, so the room's
+  // playlist stops for them.
   useEffect(() => {
-    if (!broadcasting && !inBackrooms && !inArcade && !inDuel) return
+    if (!inBackrooms && !inArcade && !inDuel) return
     suspendMusic(true)
     return () => suspendMusic(false)
-  }, [broadcasting, inBackrooms, inArcade, inDuel, suspendMusic])
-  // A broadcast and a spoken announcement are the room's PA, not the game's
-  // sound, and NEITHER mute toggle silences them: the machine this matters on
-  // is a projector laptop nobody is sitting at, where a mute left over from
-  // setup is exactly the accident that costs the room an announcement.
-  const newsAudio = useMemo(() => ({ muted: false, volume: effectsVolume }), [effectsVolume])
-  useAnnouncementVoice(net.bulletin, playsClips, newsAudio)
-  const sessionClock = useSessionClock()
+  }, [inBackrooms, inArcade, inDuel, suspendMusic])
 
   const controlling = net.myPlayerIdx !== null
   /** A mini-game is up over the room: input, rendering and the menu stand down. */
@@ -247,21 +209,6 @@ export function GameRoom({
   const selectedTeamIdx =
     selectedPlayerIdx !== null ? allPlayers[selectedPlayerIdx]?.teamIdx ?? null : null
 
-  // Standings for the wall screen. The screen is a page a player turns to, so
-  // this polls whether or not anyone is looking — the alternative is a blank
-  // board for the first fifteen seconds after every press.
-  const [leaderboard, setLeaderboard] = useState<readonly ExLeaderboardRow[]>([])
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      const rows = await getExLeaderboardFn()
-      if (alive) setLeaderboard(rows)
-    }
-    void load()
-    const id = setInterval(() => { void load() }, LEADERBOARD_POLL_MS)
-    return () => { alive = false; clearInterval(id) }
-  }, [])
-
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (overlayGame) return
@@ -317,21 +264,12 @@ export function GameRoom({
             allPlayers={allPlayers}
             selectedTeamIdx={selectedTeamIdx}
             selectedPlayerIdx={selectedPlayerIdx}
-            // A waiting room has no standings and no trading clock: the desks
-            // stay bare and the wall holds the doors countdown alone.
-            leaderboard={preEvent ? [] : leaderboard}
-            sessionClock={preEvent ? null : sessionClock}
-            countdown={preEvent ? (doors.over ? EVENT_OVER_SCREEN : doorsCountdown(doors.opensAtMs)) : null}
-            marketNews={marketNews}
-            newsAudio={newsAudio}
-            forcedScreenPage={net.forcedScreenPage}
-            presentation={net.presentation}
-            winners={net.winners}
+            board={board}
+            bulletin={bulletinText}
             onPlayerSelect={setSelectedPlayerIdx}
             localControlActive={controlling}
             localInputDisabled={menuOpen || overlayGame}
             backroomsUnlocked={net.backroomsUnlocked}
-            primeyVisible={!(preEvent && me.role === "student")}
             arcadeVisible={arcadeVisible}
             thanosSnapSeq={thanosSnapSeq}
             // Unlocked on an earlier visit: the cabinet is already there, no drop-in.
@@ -435,12 +373,6 @@ export function GameRoom({
               />
             </div>
           </div>
-
-          {/* Whose turn it is to present, flashed over the room — the scene
-              lights the desk and the wall, this makes sure nobody misses it. */}
-          <PresentationBanner presentation={net.presentation} teams={teams} />
-          {/* And whose place on the podium was just read out. */}
-          <WinnersBanner winners={net.winners} teams={teams} />
 
           {(arcadeToast || (arcadeUnlock?.userId === me.id && arcadeUnlock.saveFailed)) && (
             <RoomToast>

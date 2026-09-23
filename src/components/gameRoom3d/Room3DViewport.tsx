@@ -2,18 +2,13 @@ import { logger } from "~/lib/logger"
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { CW, CH } from "../gameRoom/constants"
 import type { RoomSelection } from "../gameRoom/InfoPanel"
-import type { RoomDrop } from "./assignment-drag"
 import {
   nextRoomCameraPan,
   type RoomCameraPan,
   type RoomCameraPanAction,
 } from "./camera-pan"
 import type { RoomPlayerInput, RoomSceneHandle, RoomSelfState } from "./scene"
-import type { ScreenPage } from "./screen-pages"
-import type { RoomPresentation } from "~/lib/presentation-order"
-import type { RoomWinners } from "~/lib/winners-ceremony"
-import type { ScreenCountdown, SessionClockSnapshot } from "./session-screen"
-import type { MarketNews } from "./useMarketNews"
+import type { RoomBoard } from "./wall"
 import { RoomTouchControls, useCoarsePointer, type TouchPadPress } from "./TouchControls"
 
 export interface Room3DViewportProps {
@@ -21,16 +16,8 @@ export interface Room3DViewportProps {
   teamLabels: string[]
   /** Whether each desk belongs to a competing team, aligned with teamLabels. */
   teamCompeting?: readonly boolean[]
-  /** Each team's placing on the live leaderboard, aligned with teamLabels;
-   *  null where a team has none yet. Drives the floating numeral over its
-   *  desk, and is deliberately NOT part of the scene identity: standings move
-   *  every few seconds and must never rebuild the room. */
-  teamRanks?: readonly (number | null)[]
-  interactionMode?: "select" | "assign"
   selectedTeamIdx?: number | null
   selectedPlayerIdx?: number | null
-  busyPlayerIdxs?: readonly number[]
-  arrivalAnimation?: RoomArrivalAnimation | null
   cameraControls?: boolean
   /** WASD/arrows are being spent on walking the local character — keep the
    * zoom keys and drag-pan, but stand the keyboard pan down. */
@@ -44,7 +31,7 @@ export interface Room3DViewportProps {
   /** Play the cabinet's drop-in entrance when it first appears (false when it
    * was unlocked on an earlier visit). */
   arcadeEntrance?: boolean
-  /** Primey stands in the room (hidden in a student's room before the doors). */
+  /** Primey stands in the room. */
   primeyVisible?: boolean
   /** Bumped once per finger snap heard: each change dusts half the room. */
   thanosSnapSeq?: number
@@ -66,47 +53,25 @@ export interface Room3DViewportProps {
    */
   touchControls?: boolean
   keyboardTargetRef?: RefObject<HTMLElement | null>
-  /** What the room's big screen shows: the running trading window's clock, or
-   * null for the countdown to launch day. */
-  sessionClock?: SessionClockSnapshot | null
-  /** What the clock page counts to with no window running: the doors before
-   * they open, or null for launch day. */
-  countdown?: ScreenCountdown | null
-  /** A public market bulletin temporarily taking over the wall screen. */
-  marketNews?: MarketNews | null
-  /**
-   * A page the gamemaster has pinned the wall screen to for the whole room, or
-   * null while the players turn it themselves with interact.
-   */
-  forcedScreenPage?: ScreenPage | null
-  /** The presentation running order, by desk, or null — see GameRoom3D. */
-  presentation?: RoomPresentation | null
-  /** The winners' ceremony, by desk, or null — see GameRoom3D. */
-  winners?: RoomWinners | null
-  /** Fixed room-PA settings for a filmed broadcast playing on that screen. */
-  newsAudio?: { muted: boolean; volume: number }
+  /** The wall's resting page, or null for the room's title alone. */
+  board?: RoomBoard | null
+  /** A bulletin taking over the wall, or null while it shows the board. */
+  bulletin?: string | null
   /**
    * Fill the parent instead of keeping the room's own aspect box. The parent
    * owns the size (and any chrome); the canvas tracks it via ResizeObserver.
    */
   fill?: boolean
   onPick?: (pick: RoomSelection) => void
-  onPlayerHover?: (playerIdx: number | null) => void
-  onDrop?: (drop: RoomDrop) => void
   /** The scene handle, for imperative drivers (the multiplayer net hook) —
    * called with the handle once the scene is live, and null when it goes away. */
   onSceneReady?: (handle: RoomSceneHandle | null) => void
   onSelfState?: (state: RoomSelfState) => void
   onInteract?: (targetPlayerIdx: number) => void
   onTableInteract?: (tableIdx: number) => void
-  /** Interact fired while facing Primey — opens the chat panel, local only. */
+  /** Interact fired while facing Primey — local only. */
   onPrimeyInteract?: () => void
   onMenuToggle?: () => void
-}
-
-export interface RoomArrivalAnimation {
-  playerIdx: number
-  sequence: number
 }
 
 const ROOM_CAMERA_FIT_ZOOM = 1
@@ -192,38 +157,6 @@ export function RoomCameraLegend({ walkMode = false, onMenuToggle }: { walkMode?
   )
 }
 
-export function shouldAnimateRoomTeamChange(
-  previousTeamIdx: number | null | undefined,
-  nextTeamIdx: number | null,
-  busy: boolean,
-): boolean {
-  return !busy && previousTeamIdx === null && nextTeamIdx !== null
-}
-
-export function replayRoomArrival(
-  handle: RoomSceneHandle,
-  players: readonly RoomPlayerInput[],
-  animation: RoomArrivalAnimation,
-): boolean {
-  const player = players.find((candidate) => candidate.playerIdx === animation.playerIdx)
-  if (!player || player.teamIdx === null) return false
-  handle.setPlayerTeam(animation.playerIdx, null, false)
-  handle.setPlayerTeam(animation.playerIdx, player.teamIdx, true)
-  return true
-}
-
-export function consumeRoomArrival(
-  handle: RoomSceneHandle,
-  players: readonly RoomPlayerInput[],
-  animation: RoomArrivalAnimation,
-  consumedSequence: number | null,
-): number | null {
-  if (animation.sequence === consumedSequence) return consumedSequence
-  return replayRoomArrival(handle, players, animation)
-    ? animation.sequence
-    : consumedSequence
-}
-
 /**
  * A generated sheet is a base64 PNG data URL — tens of kilobytes per player —
  * and the identity key is serialized on every render, so the key carries a
@@ -240,22 +173,18 @@ export function room3DSceneIdentityKey(input: {
   players: readonly RoomPlayerInput[]
   teamLabels: readonly string[]
   teamCompeting?: readonly boolean[]
-  interactionMode: "select" | "assign"
 }): string {
   return JSON.stringify({
-    interactionMode: input.interactionMode,
     teamLabels: input.teamLabels,
     teamCompeting: input.teamCompeting,
     // The sprite fields belong here even though team assignments deliberately
     // do NOT: a team change is applied to a live scene through the handle,
     // whereas a character is baked into its mesh when the scene is built and
-    // there is no handle to swap it. Omitting them left a room mounted before
-    // the change showing the old character until the process was restarted.
-    players: input.players.map(({ playerIdx, name, seatIdx, draggable, spriteId, spriteSheet }) => ({
+    // there is no handle to swap it.
+    players: input.players.map(({ playerIdx, name, seatIdx, spriteId, spriteSheet }) => ({
       playerIdx,
       name,
       seatIdx,
-      draggable,
       spriteId: spriteId ?? null,
       spriteSheet: sheetDigest(spriteSheet),
     })),
@@ -266,12 +195,8 @@ export function Room3DViewport({
   players,
   teamLabels,
   teamCompeting,
-  teamRanks,
-  interactionMode = "select",
   selectedTeamIdx = null,
   selectedPlayerIdx = null,
-  busyPlayerIdxs = [],
-  arrivalAnimation = null,
   cameraControls = false,
   suppressPanKeys = false,
   localInputDisabled = false,
@@ -287,17 +212,10 @@ export function Room3DViewport({
   onTouchPadPress,
   touchControls = false,
   keyboardTargetRef,
-  sessionClock = null,
-  countdown = null,
-  marketNews = null,
-  forcedScreenPage = null,
-  presentation = null,
-  winners = null,
-  newsAudio,
+  board = null,
+  bulletin = null,
   fill = false,
   onPick,
-  onPlayerHover,
-  onDrop,
   onSceneReady,
   onSelfState,
   onInteract,
@@ -307,12 +225,8 @@ export function Room3DViewport({
 }: Room3DViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const handleRef = useRef<RoomSceneHandle | null>(null)
-  const sceneTeamsRef = useRef(new Map<number, number | null>())
   const playersRef = useRef(players)
-  const busyPlayerIdxsRef = useRef(busyPlayerIdxs)
   const onPickRef = useRef(onPick)
-  const onPlayerHoverRef = useRef(onPlayerHover)
-  const onDropRef = useRef(onDrop)
   const onSceneReadyRef = useRef(onSceneReady)
   const onSelfStateRef = useRef(onSelfState)
   const onInteractRef = useRef(onInteract)
@@ -321,8 +235,6 @@ export function Room3DViewport({
   const onBackroomsEnterRef = useRef(onBackroomsEnter)
   const onArcadeInteractRef = useRef(onArcadeInteract)
   const onArcadeLandedRef = useRef(onArcadeLanded)
-  const consumedArrivalSequenceRef = useRef<number | null>(null)
-  const teamRanksRef = useRef(teamRanks)
   const [cameraZoom, setCameraZoom] = useState(
     cameraControls ? ROOM_CAMERA_DEFAULT_ZOOM : ROOM_CAMERA_FIT_ZOOM,
   )
@@ -338,10 +250,7 @@ export function Room3DViewport({
   const showTouchControls = touchControls && coarsePointer
 
   playersRef.current = players
-  busyPlayerIdxsRef.current = busyPlayerIdxs
   onPickRef.current = onPick
-  onPlayerHoverRef.current = onPlayerHover
-  onDropRef.current = onDrop
   onSceneReadyRef.current = onSceneReady
   onSelfStateRef.current = onSelfState
   onInteractRef.current = onInteract
@@ -353,16 +262,14 @@ export function Room3DViewport({
   cameraZoomRef.current = cameraZoom
   cameraPanRef.current = cameraPan
   localInputDisabledRef.current = localInputDisabled
-  teamRanksRef.current = teamRanks
 
-  // Team and busy changes flow through the scene handle. Recreate only when
-  // the cast, immutable team presentation (labels and category), or mode changes.
+  // Team changes flow through the scene handle. Recreate only when the cast
+  // or the immutable desk labels and categories changes.
   const sceneIdentityKey = useMemo(() => room3DSceneIdentityKey({
-    interactionMode,
     teamLabels,
     teamCompeting,
     players,
-  }), [interactionMode, players, teamCompeting, teamLabels])
+  }), [players, teamCompeting, teamLabels])
 
   useEffect(() => {
     const container = containerRef.current
@@ -378,20 +285,14 @@ export function Room3DViewport({
         players: initialPlayers,
         teamLabels,
         teamCompeting,
-        // Whatever the standings are by the time the scene finishes loading,
-        // not whatever they were when the effect started.
-        teamRanks: teamRanksRef.current,
-        interactionMode,
         onPick: (pick) => onPickRef.current?.(pick),
-        onPlayerHover: (playerIdx) => onPlayerHoverRef.current?.(playerIdx),
-        onDrop: (drop) => onDropRef.current?.(drop),
         onSelfState: (state) => onSelfStateRef.current?.(state),
         onInteract: (targetPlayerIdx) => onInteractRef.current?.(targetPlayerIdx),
         onTableInteract: (tableIdx) => onTableInteractRef.current?.(tableIdx),
         onPrimeyInteract: () => onPrimeyInteractRef.current?.(),
         onBackroomsEnter: () => onBackroomsEnterRef.current?.(),
-         onArcadeInteract: () => onArcadeInteractRef.current?.(),
-         onArcadeLanded: () => onArcadeLandedRef.current?.(),
+        onArcadeInteract: () => onArcadeInteractRef.current?.(),
+        onArcadeLanded: () => onArcadeLandedRef.current?.(),
         // The scene has already moved the camera by the time these arrive —
         // they keep the keyboard's and buttons' idea of the view in step, so
         // the next key or +/− press carries on where the gesture left off.
@@ -405,25 +306,9 @@ export function Room3DViewport({
         }
         handle = created
         handleRef.current = created
-        sceneTeamsRef.current = new Map(initialPlayers.map((player) => [player.playerIdx, player.teamIdx]))
-
-        const latestPlayers = playersRef.current
-        const busy = new Set(busyPlayerIdxsRef.current)
-        for (const player of latestPlayers) {
-          created.setPlayerLobbyOrdinal?.(player.playerIdx, player.lobbyOrdinal ?? null)
-          const previousTeam = sceneTeamsRef.current.get(player.playerIdx)
-          created.setPlayerTeam(
-            player.playerIdx,
-            player.teamIdx,
-            shouldAnimateRoomTeamChange(
-              previousTeam,
-              player.teamIdx,
-              busy.has(player.playerIdx),
-            ),
-          )
-          sceneTeamsRef.current.set(player.playerIdx, player.teamIdx)
+        for (const player of playersRef.current) {
+          created.setPlayerTeam(player.playerIdx, player.teamIdx)
         }
-        for (const player of latestPlayers) created.setPlayerBusy(player.playerIdx, busy.has(player.playerIdx))
         created.setCameraZoom(cameraZoomRef.current)
         created.setCameraPan(cameraPanRef.current.x, cameraPanRef.current.z)
         created.setSelection(selectedTeamIdx, selectedPlayerIdx)
@@ -455,29 +340,8 @@ export function Room3DViewport({
   useEffect(() => {
     const handle = handleRef.current
     if (!handle) return
-    const busy = new Set(busyPlayerIdxs)
-    for (const player of players) {
-      handle.setPlayerLobbyOrdinal?.(player.playerIdx, player.lobbyOrdinal ?? null)
-      const previousTeam = sceneTeamsRef.current.get(player.playerIdx)
-      handle.setPlayerTeam(
-        player.playerIdx,
-        player.teamIdx,
-        shouldAnimateRoomTeamChange(
-          previousTeam,
-          player.teamIdx,
-          busy.has(player.playerIdx),
-        ),
-      )
-      sceneTeamsRef.current.set(player.playerIdx, player.teamIdx)
-    }
+    for (const player of players) handle.setPlayerTeam(player.playerIdx, player.teamIdx)
   }, [players, ready])
-
-  useEffect(() => {
-    const handle = handleRef.current
-    if (!handle) return
-    const busy = new Set(busyPlayerIdxs)
-    for (const player of players) handle.setPlayerBusy(player.playerIdx, busy.has(player.playerIdx))
-  }, [busyPlayerIdxs, players, ready])
 
   useEffect(() => {
     handleRef.current?.setSelection(selectedTeamIdx, selectedPlayerIdx)
@@ -488,10 +352,10 @@ export function Room3DViewport({
   }, [ready, backroomsUnlocked])
 
   useEffect(() => {
-   handleRef.current?.setArcadeVisible?.(arcadeVisible, arcadeEntrance)
- }, [ready, arcadeVisible, arcadeEntrance])
+    handleRef.current?.setArcadeVisible?.(arcadeVisible, arcadeEntrance)
+  }, [ready, arcadeVisible, arcadeEntrance])
 
- useEffect(() => {
+  useEffect(() => {
     handleRef.current?.setPrimeyVisible?.(primeyVisible)
   }, [ready, primeyVisible])
 
@@ -508,41 +372,16 @@ export function Room3DViewport({
     handleRef.current?.setRenderPaused?.(renderPaused)
   }, [ready, renderPaused])
 
-  // Standings arrive on their own cadence — the leaderboard poll, every few
-  // seconds — long after the scene was built, so they go through the handle
-  // exactly as team changes do. Rebuilding the room for a placing would drop
-  // the camera, the walk and everyone's position.
+  // The wall's contents go through the handle exactly as team changes do.
+  // Rebuilding the room for a line of text would drop the camera, the walk
+  // and everyone's position.
   useEffect(() => {
-    handleRef.current?.setTeamRanks(teamRanks ?? [])
-  }, [ready, teamRanks])
+    handleRef.current?.setBoard(board)
+  }, [board, ready])
 
   useEffect(() => {
-    handleRef.current?.setSessionClock(sessionClock)
-  }, [ready, sessionClock])
-
-  useEffect(() => {
-    handleRef.current?.setCountdown(countdown)
-  }, [ready, countdown])
-
-  useEffect(() => {
-    handleRef.current?.setMarketNews(marketNews)
-  }, [marketNews, ready])
-
-  useEffect(() => {
-    handleRef.current?.setForcedScreenPage(forcedScreenPage)
-  }, [forcedScreenPage, ready])
-
-  useEffect(() => {
-    handleRef.current?.setPresentation(presentation)
-  }, [presentation, ready])
-
-  useEffect(() => {
-    handleRef.current?.setWinners(winners)
-  }, [winners, ready])
-
-  useEffect(() => {
-    if (newsAudio) handleRef.current?.setNewsAudio(newsAudio)
-  }, [newsAudio, ready])
+    handleRef.current?.setBulletin(bulletin)
+  }, [bulletin, ready])
 
   useEffect(() => {
     handleRef.current?.setCameraZoom(cameraZoom)
@@ -615,17 +454,6 @@ export function Room3DViewport({
     container.addEventListener("wheel", onWheel, { passive: false })
     return () => container.removeEventListener("wheel", onWheel)
   }, [cameraControls])
-
-  useEffect(() => {
-    const handle = handleRef.current
-    if (!handle || !arrivalAnimation) return
-    consumedArrivalSequenceRef.current = consumeRoomArrival(
-      handle,
-      players,
-      arrivalAnimation,
-      consumedArrivalSequenceRef.current,
-    )
-  }, [arrivalAnimation, players, ready])
 
   const overlayStyle: React.CSSProperties = {
     position: "absolute",

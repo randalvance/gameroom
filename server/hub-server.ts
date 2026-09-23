@@ -5,13 +5,9 @@
 //   1. MULTIPLAYER. The hub (src/server/hub.ts) is the authority for what
 //      every character in the room is doing; this serves it over SSE down and
 //      POST up, which is the transport the client half already speaks.
-//   2. THE GAMEMASTER'S CONTROLS. The wall screen, the bulletins, the running
-//      order and the podium are room state, so they are commands to the hub
-//      rather than anything a client holds.
-//
-// Everything else it answers (the standings, the trading clock, the doors) is
-// DEMO DATA. The room reads those the way a page reads any feed — swap these
-// handlers for your own and the room does not know the difference.
+//   2. THE GAMEMASTER'S CONTROLS. A bulletin and the room's music are room
+//      state, so they are commands to the hub rather than anything a client
+//      holds.
 //
 // Identity is a cookie, and deliberately not a security boundary: this is a
 // demo host, not an auth system. Put your own in front of it before you point
@@ -20,56 +16,28 @@
 import { randomUUID } from "node:crypto"
 import { getGameRoomHub, setGameRoomRoster, type GuestUser } from "../src/server/hub"
 import { parseChat, parseInteract, parsePlayerInput } from "../src/lib/gameRoomNet/protocol"
-import { parseBulletinInput, parseScreenPageInput } from "../src/lib/game-room-control"
+import { parseBulletinInput } from "../src/lib/game-room-control"
 import { parseRoomMusicInput } from "../src/lib/game-room-music"
-import type { PodiumPlace } from "../src/lib/winners-ceremony"
-import { demoLeaderboard, demoTeams } from "./demo-roster"
+import { demoTeams } from "./demo-roster"
 
 const PORT = Number(process.env.PORT ?? 8787)
 /** Comment frames defeat idle-connection buffering in proxies. */
 const KEEPALIVE_MS = 15_000
-/** The demo's trading window: long enough that the wall clock is always ticking. */
-const WINDOW_SECONDS = 45 * 60
 
 const teams = demoTeams()
 setGameRoomRoster(teams)
 
 /**
  * Visitors who are not on the roster — everyone, in the demo, since the
- * roster is twelve desks of made-up students. The room seats a guest with no
- * desk of their own, which is also how mentors, judges and staff arrive at the
- * real event. They announce themselves on the way in (POST /api/identity);
- * a visitor the hub has never heard of is a spectator until they do.
+ * roster is desks of made-up people. The room seats a guest with no desk of
+ * their own. They announce themselves on the way in (POST /api/identity); a
+ * visitor the hub has never heard of is a spectator until they do.
  */
 const guests = new Map<string, GuestUser>()
 
 const hub = getGameRoomHub({
   loadGuest: async (userId) => guests.get(userId) ?? null,
 })
-const leaderboard = demoLeaderboard(teams)
-const startedAt = Date.now()
-
-/** The event's scripted announcements — the panel's one-press buttons. */
-const PRESETS = [
-  {
-    id: "open",
-    label: "MARKET OPEN",
-    message: "The market is open. Good luck, everyone.",
-    affectedSymbol: "",
-  },
-  {
-    id: "ten-minutes",
-    label: "TEN MINUTES LEFT",
-    message: "Ten minutes to the close. Flatten what you cannot carry.",
-    affectedSymbol: "",
-  },
-  {
-    id: "halt",
-    label: "TRADING HALT",
-    message: "Trading in ACME is halted pending an announcement.",
-    affectedSymbol: "ACME",
-  },
-]
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -196,41 +164,8 @@ async function handle(request: Request): Promise<Response> {
 
   // ------------------------------------------------------------- demo feeds
   if (path === "/api/roster") return json(teams)
-  if (path === "/api/leaderboard") return json(leaderboard)
-  if (path === "/api/doors") {
-    // Open. A host with a gate answers a future `opensAtMs` and the room turns
-    // itself into a waiting room, counting on the server's clock.
-    return json({ opensAtMs: 0, serverNowMs: Date.now() })
-  }
-  if (path === "/api/session") {
-    const elapsed = Math.floor((Date.now() - startedAt) / 1000) % WINDOW_SECONDS
-    return json({
-      id: "demo-window",
-      status: "running",
-      mode: "demo",
-      startedAt: new Date(startedAt).toISOString(),
-      elapsedSeconds: elapsed,
-      durationSeconds: WINDOW_SECONDS,
-      remainingSeconds: WINDOW_SECONDS - elapsed,
-    })
-  }
-  // No filmed broadcasts ship with the library: every bulletin is a text
-  // banner, which is the path an ad-hoc announcement already takes.
-  if (path === "/api/market-news/clips") return json([])
-  if (path === "/api/market-news/broadcast" && post) return json(null)
 
   // -------------------------------------------------------- room controls
-  if (path === "/api/room/announcement-presets") return json(PRESETS)
-
-  if (path === "/api/room/screen" && post) {
-    try {
-      hub.setScreenPage(parseScreenPageInput(await body(request)))
-    } catch (error) {
-      return badRequest((error as Error).message)
-    }
-    return new Response(null, { status: 204 })
-  }
-
   if (path === "/api/room/music" && post) {
     try {
       hub.setMusic(parseRoomMusicInput(await body(request)))
@@ -247,67 +182,8 @@ async function handle(request: Request): Promise<Response> {
     } catch (error) {
       return badRequest((error as Error).message)
     }
-    hub.sendBulletin(input.message, input.affectedSymbol, { holdMs: input.holdSeconds * 1000 })
-    // No speech vendor here, so nothing read it aloud. Not an error: the site
-    // this came from reports the same when no voice is configured.
-    return json({ spoken: false, voiceError: null })
-  }
-
-  const presentationView = () => json({
-    state: hub.getPresentation(),
-    teams: teams.filter((t) => t.competing !== false).map((t) => ({ id: t.id, name: t.name })),
-  })
-  const winnersView = () => json({
-    state: hub.getWinners(),
-    teams: teams.filter((t) => t.competing !== false).map((t) => ({ id: t.id, name: t.name })),
-  })
-
-  if (path === "/api/room/presentation") return presentationView()
-  if (path === "/api/room/presentation/randomize" && post) {
-    // Exhibition desks are seated but out of the draw, the same rule the
-    // podium follows.
-    const order = teams.filter((t) => t.competing !== false).map((t) => t.id)
-    for (let i = order.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1))
-      ;[order[i], order[j]] = [order[j]!, order[i]!]
-    }
-    hub.setPresentationOrder(order)
-    return presentationView()
-  }
-  if (path === "/api/room/presentation/spotlight" && post) {
-    const input = (await body(request)) as { teamId?: string | null } | null
-    hub.setPresentationSpotlight(input?.teamId ?? null)
-    return presentationView()
-  }
-  if (path === "/api/room/presentation/clear" && post) {
-    hub.setPresentationOrder(null)
-    return presentationView()
-  }
-  if (path === "/api/room/presentation/done" && post) {
-    const input = (await body(request)) as { teamId?: string; done?: boolean } | null
-    if (!input?.teamId) return badRequest("INVALID_INPUT: teamId required")
-    hub.setPresentationDone(input.teamId, input.done !== false)
-    return presentationView()
-  }
-
-  if (path === "/api/room/winners") return winnersView()
-  if (path === "/api/room/winners/start" && post) {
-    hub.startWinners()
-    return winnersView()
-  }
-  if (path === "/api/room/winners/announce" && post) {
-    const input = (await body(request)) as { place?: number; teamId?: string } | null
-    if (!input?.teamId || !input.place) return badRequest("INVALID_INPUT: place and teamId required")
-    // The hub enforces the order — third, then second, then first — so a place
-    // out of turn is refused here rather than half-applied.
-    if (!hub.announceWinner(input.place as PodiumPlace, input.teamId)) {
-      return badRequest("That place is not the next one to read.")
-    }
-    return winnersView()
-  }
-  if (path === "/api/room/winners/end" && post) {
-    hub.clearWinners()
-    return winnersView()
+    hub.sendBulletin(input.message, { holdMs: input.holdSeconds * 1000 })
+    return new Response(null, { status: 204 })
   }
 
   return new Response("Not found", { status: 404 })

@@ -131,7 +131,7 @@ export function advanceScreenFocus(current: number, focused: boolean, steps: num
  *
  * Focus rebinds the walk keys rather than sharing them: with the camera off
  * the character there is nothing useful to be seen walking left or right, so
- * those two turn the page instead. Down is the way out — it backs the camera
+ * those two are swallowed. Down is the way out — it backs the camera
  * off AND walks, so leaving is the same one press it would have been if the
  * screen had never taken the view. Up is swallowed rather than passed through,
  * because the only thing north of a player reading the screen is the wall it
@@ -140,15 +140,13 @@ export function advanceScreenFocus(current: number, focused: boolean, steps: num
  * `null` means focus has no opinion and the room's normal handling stands.
  */
 export type ScreenFocusKeyAction =
-  | "page-prev"
-  | "page-next"
   | "exit"
   | "exit-and-move"
   | "swallow"
 
 const FOCUS_KEY: Record<string, ScreenFocusKeyAction> = {
-  arrowleft: "page-prev", a: "page-prev",
-  arrowright: "page-next", d: "page-next",
+  arrowleft: "swallow", a: "swallow",
+  arrowright: "swallow", d: "swallow",
   arrowdown: "exit-and-move", s: "exit-and-move",
   arrowup: "swallow", w: "swallow",
   " ": "exit", e: "exit",
@@ -164,8 +162,8 @@ export function screenFocusKeyAction(key: string, focused: boolean): ScreenFocus
  * How far into the move the room's furniture goes.
  *
  * The team tables stand between the camera and the wall, and at the framed
- * pose they cover the bottom of the screen — the very band the standings'
- * figures sit in. So they are taken out of the way while
+ * pose they cover the bottom of the screen — the band a bulletin's last
+ * line sits in. So they are taken out of the way while
  * the screen is being read, and put back on the way out.
  *
  * Not at t = 0: a table vanishing while the camera is still sitting in the

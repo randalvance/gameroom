@@ -10,7 +10,7 @@ import {
 import { guestSpawnPoint } from "~/server/hub"
 import { OBJECT_IDX_BASE, ROOM_OBJECTS } from "../../lib/gameRoomNet/objects"
 import { resolveRoomInteract } from "../../lib/gameRoomNet/tables"
-import { BIG_SCREEN_IDX } from "./screen-pages"
+import { BIG_SCREEN_IDX } from "./wall"
 import {
   PRIMEY_BODY_HEIGHT,
   PRIMEY_IDX,

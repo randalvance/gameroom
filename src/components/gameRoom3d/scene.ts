@@ -37,29 +37,10 @@ import {
     primeyFrameOffset,
     primeyPlaneSize,
 } from "./primey-npc"
-import { crownsFor, type Crown, type CrownRole } from "./crowns"
 import { roomTitle } from "./room-branding"
-import { CROWN_SPRITE_PX, drawCrown } from "./crown-sprites"
-import type { ExLeaderboardRow } from "../../lib/exchange-types"
-import {
-    BIG_SCREEN_IDX,
-    BIG_SCREEN_POINT,
-    boardRows,
-    boardTitle,
-    isBoardPage,
-    nextScreenPage,
-    prevScreenPage,
-    TEXT_GAIN,
-    TEXT_GOLD,
-    TEXT_LOSS,
-    pageDwellMs,
-    SCREEN_PAGES,
-    availableScreenPages,
-    type ScreenBoardRow,
-    type ScreenPage,
-} from "./screen-pages"
+import { BIG_SCREEN_IDX, BIG_SCREEN_POINT, BOARD_MAX_LINES, type RoomBoard } from "./wall"
+import { localMinutes, parseTimeOverride, skyPalette } from "./time-of-day"
 import type { RoomSelection } from "../gameRoom/InfoPanel"
-import { resolveRoomDrop, roomDragHighlightState, roomDragPlayerHover, type RoomDrop } from "./assignment-drag"
 import {
     CHARACTER_SCALE,
     characterGroundY,
@@ -68,36 +49,10 @@ import {
     characterTopY,
     NOMINAL_CHARACTER_TOP_Y,
 } from "./character-scale"
-import { assignmentSceneLayout, lobbyPosition } from "./scene-layout"
 import { createBackdrop } from "./backdrop"
 import { createBackroomsHatch, maskHatchOpening } from "./backrooms-hatch"
 import { ARCADE_IDX, ARCADE_POINT, createArcadeCabinet } from "./arcade-cabinet"
 import { createArcadeReveal, REVEAL, type ArcadeReveal } from "./arcade-reveal"
-import {
-    advanceNightBlend,
-    mixPalette,
-    NIGHT_SHOW_MINUTE,
-    nightBlendTarget,
-    parseTimeOverride,
-    sgtMinutes,
-    skyPalette,
-} from "./time-of-day"
-import {
-    createFireworks,
-    fireworksCueFor,
-    launchVolley,
-    MAX_SPARKS,
-    stepFireworks,
-    victoryMusicFor,
-    volleyForPlace,
-} from "./fireworks"
-import {
-    podiumByTeamIdx,
-    podiumLabel,
-    winnersBoard,
-    type RoomWinners,
-    type WinnersBoard,
-} from "~/lib/winners-ceremony"
 import {
     EMPTY_TABLE_LABEL,
     isExhibitionDesk,
@@ -106,30 +61,6 @@ import {
     tableLabelText,
     tableTopColorForCompetition,
 } from "./team-tables"
-import { rankNumeralCells, rankNumeralColor, rankNumeralCssColor } from "./rank-numerals"
-import {
-    PRESENTATION_COLOR,
-    PRESENTATION_CSS_COLOR,
-    PRESENTATION_DONE_COLOR,
-    PRESENTATION_DONE_CSS_COLOR,
-    houseDimGoal,
-    isDeskDone,
-    ordinal,
-    presentationBoard,
-    presentationSlotsByTeamIdx,
-    revealProgress,
-    type PresentationBoard,
-    type RoomPresentation,
-} from "~/lib/presentation-order"
-import { PresentationAudioPlayer } from "./presentation-audio"
-import { eventStarted, screenLines, type ScreenCountdown, type SessionClockSnapshot } from "./session-screen"
-import { marketNewsHeader, type MarketNews, type MarketNewsClip } from "./useMarketNews"
-import { broadcastFitRect, broadcastWorldRect } from "./market-news-video"
-import {
-    BroadcastPicturePass,
-    applyBroadcastPictureShader,
-    broadcastPictureUniforms,
-} from "./broadcast-picture"
 import { advanceSimClock } from "./sim-clock"
 import {
     clampRoomCameraPan,
@@ -145,7 +76,6 @@ import {
     screenFocusHidesRoom,
     screenFocusKeyAction,
     screenFocusPose,
-    BROADCAST_FOCUS_PADDING,
     type CameraPose,
     type ScreenFocusKeyAction,
 } from "./screen-focus"
@@ -175,9 +105,7 @@ export interface RoomPlayerInput {
     role?: RoomRole
     teamIdx: number | null
     seatIdx: number
-    lobbyOrdinal?: number | null
     playerIdx: number
-    draggable: boolean
     /** Admin-assigned sprite override (users.sprite_id); null/absent = derived hash. */
     spriteId?: number | null
     /** Generated 4×4 sheet (users.sprite_sheet, PNG data URL); drawn only while spriteId = CUSTOM_SPRITE_ID. */
@@ -219,16 +147,7 @@ export interface CreateRoomOptions {
     teamLabels: string[]
     /** Whether each desk belongs to a competing team, aligned with teamLabels. */
     teamCompeting?: readonly boolean[]
-    /**
-     * Each team's placing on the live leaderboard, aligned with teamLabels. A
-     * team with no placing yet (or no exchange result at all) is null and gets
-     * no numeral — see lib/team-ranks.ts.
-     */
-    teamRanks?: readonly (number | null)[]
-    interactionMode?: "select" | "assign"
     onPick?: (pick: RoomSelection) => void
-    onPlayerHover?: (playerIdx: number | null) => void
-    onDrop?: (drop: RoomDrop) => void
     /** Dragging the floor moves the camera; this reports where it ended up. */
     onCameraPan?: (pan: RoomCameraPan) => void
     /** A pinch zoomed the camera; this keeps the viewport's zoom state (and so
@@ -266,13 +185,9 @@ export interface CreateRoomOptions {
 
 export interface RoomSceneHandle {
     setSelection(teamIdx: number | null, playerIdx: number | null): void
-    /** Standings moved: the floating numeral over each desk, by team index. */
-    setTeamRanks(ranks: readonly (number | null)[]): void
     setCameraPan(x: number, z: number): void
     setCameraZoom(zoom: number): void
-    setPlayerLobbyOrdinal?(playerIdx: number, lobbyOrdinal: number | null): void
     setPlayerTeam(playerIdx: number, teamIdx: number | null, animate?: boolean): void
-    setPlayerBusy(playerIdx: number, busy: boolean): void
     /** Hub-driven positions for remote characters (the local player is skipped). */
     setNetStates(states: readonly RoomNetState[]): void
     /** Idle characters, with the wander state to run them from locally. Each
@@ -289,7 +204,7 @@ export interface RoomSceneHandle {
      * unless `entrance` is false (already unlocked on an earlier visit). */
     setArcadeVisible?(visible: boolean, entrance?: boolean): void
     /** Show or hide Primey. Hidden, it is neither drawn nor an interact target
-     * (a student's room before the doors open has no Primey). */
+     * hidden, the room has no mascot). */
     setPrimeyVisible?(visible: boolean): void
     /** Half of the other characters, at random, crumble to dust. Private to
      * this client and forgotten on reload — nothing reaches the hub. Snapping
@@ -300,49 +215,18 @@ export interface RoomSceneHandle {
     showSpeech(playerIdx: number, text: string): void
     /** A speech bubble above an interactable object (OBJECT_IDX_BASE-keyed). */
     showObjectSpeech(objectIdx: number, text: string): void
-    /** What the wall screen's clock page counts down: the running trading
-     * window's clock, or null for the countdown to launch day. */
-    setSessionClock(session: SessionClockSnapshot | null): void
-    /** What the clock page counts to with no window running: the doors before
-     * they open, or null for launch day. */
-    setCountdown(countdown: ScreenCountdown | null): void
-    /** A public market bulletin temporarily taking over the wall screen. */
-    setMarketNews(news: MarketNews | null): void
+    /** The wall's resting page: a title and a few lines, or null for the
+     * room's title alone. */
+    setBoard(board: RoomBoard | null): void
     /**
-     * Pin the wall screen to one page for the whole room, or null to hand it
-     * back to the players.
+     * A bulletin taking over the wall, or null to hand it back.
      *
-     * While a page is pinned it is ABSOLUTE: neither the dwell cycle, an
-     * interact press, nor the countdown's own takeovers move off it. The
-     * gamemaster took the wall deliberately and has a RELEASE button; a wall
-     * that quietly turned itself back would be the worse surprise.
+     * While one is up every camera in the room turns to the wall and holds —
+     * the furniture stands down so the whole text can be read — and is handed
+     * back when it comes down, unless the player has since taken the camera
+     * elsewhere themselves.
      */
-    setForcedScreenPage(page: ScreenPage | null): void
-    /**
-     * The presentation running order the gamemaster drew, by desk, or null.
-     *
-     * The room goes dark and a spotlight sweeps the desks in order — as it
-     * lands, that desk's numeral becomes its presentation slot rather than its
-     * placing, and the wall screen fixes on the order. A spotlit team is lit
-     * alone. The sweep replays from the state's own clock, so a room that
-     * arrives late shows the finished board rather than a private reveal.
-     */
-    setPresentation(presentation: RoomPresentation | null): void
-    /**
-     * The winners' ceremony, by desk, or null.
-     *
-     * The room turns to the wall — the same framed view a bulletin takes — and
-     * the sky falls to night if it is not already. The wall shows the podium as
-     * it is read; each place hangs its medal over the team's desk and fires a
-     * volley of fireworks over the city beyond the front wall, the winner's
-     * being the finale. The standings' numerals are taken down for the
-     * duration, so the desks cannot give the podium away before it is read.
-     */
-    setWinners(winners: RoomWinners | null): void
-    /** The fixed room-PA audio settings, pushed in because the scene has no React context. */
-    setNewsAudio(settings: { muted: boolean; volume: number }): void
-    /** Latest standings for the wall screen's leaderboard page (empty = none yet). */
-    setLeaderboard(rows: readonly ExLeaderboardRow[]): void
+    setBulletin(text: string | null): void
     /** Lock the local player's movement for a conversation; optionally turn
      * them to face their dialog partner. */
     freezeLocalInput(ms: number, faceDir?: WalkDir): void
@@ -442,7 +326,7 @@ function mulberry(seed: number) {
     }
 }
 
-/** A soft round spot for the fireworks' sparks: bright core, feathered edge. */
+/** A soft round spot for dust motes: bright core, feathered edge. */
 function makeSparkTexture(): THREE.CanvasTexture {
     const size = 32
     const c = document.createElement("canvas")
@@ -617,23 +501,28 @@ const SCREEN_TEX_H = 468
  */
 const SCREEN_CONTENT_BOTTOM = 330
 
+/** Greedy word wrap into at most `maxLines` lines; a longer text is elided. */
+function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
+    const words = text.split(/\s+/).filter(Boolean)
+    const lines: string[] = []
+    for (const word of words) {
+        const at = lines.length - 1
+        const candidate = at < 0 ? word : `${lines[at]} ${word}`
+        if (at < 0 || ctx.measureText(candidate).width > maxWidth) lines.push(word)
+        else lines[at] = candidate
+    }
+    const visible = lines.slice(0, maxLines)
+    if (lines.length > visible.length && visible.length > 0) {
+        visible[visible.length - 1] = `${visible[visible.length - 1]!.replace(/[.…]+$/, "")}…`
+    }
+    return visible
+}
+
 /**
- * @param broadcast whether a filmed picture is up on the wall IN FRONT of this
- * canvas — see the broadcast picture quad in createRoomScene. The canvas then
- * paints only the panel and its border for the picture to sit on, and is not
- * touched again until the clip ends: the picture drives its own texture.
+ * The wall: a bulletin while one is up, otherwise the board — the host's
+ * title and lines, or the room's own title over an empty band.
  */
-function drawScreenCanvas(
-    ctx: CanvasRenderingContext2D,
-    page: ScreenPage,
-    board: readonly ScreenBoardRow[],
-    session: SessionClockSnapshot | null,
-    countdown: ScreenCountdown | undefined,
-    marketNews: MarketNews | null,
-    broadcast = false,
-    presentation: PresentationBoard | null = null,
-    winners: WinnersBoard | null = null,
-) {
+function drawScreenCanvas(ctx: CanvasRenderingContext2D, board: RoomBoard | null, bulletin: string | null) {
     const W = SCREEN_TEX_W, H = SCREEN_TEX_H
     ctx.fillStyle = "#020510"
     ctx.fillRect(0, 0, W, H)
@@ -641,319 +530,34 @@ function drawScreenCanvas(
     ctx.lineWidth = 8
     ctx.strokeRect(8, 8, W - 16, H - 16)
     ctx.textAlign = "center"
-    if (marketNews) {
-        // A filmed broadcast is the whole screen. The clip opens on its own titles
-        // and the anchor says the headline out loud, so a banner and a wall of
-        // text beside it would only be the same news twice. The picture itself is
-        // a separate quad over this panel; all the canvas owes it is the black
-        // and the border already painted above.
-        if (broadcast) return
-
-        // One header line. The wall used to carry a BREAKING MARKET NEWS bar over
-        // a MARKET BULLETIN subtitle, which was written when the only thing that
-        // could reach this screen was a scripted market event. The gamemaster now
-        // types "lunch is in the atrium" through the same path, and crying
-        // breaking news over it was absurd — so the header is generic unless the
-        // server has said this bulletin is a scripted event with no film.
+    if (bulletin) {
         ctx.fillStyle = "#A51F32"
         ctx.fillRect(12, 12, W - 24, 88)
         ctx.fillStyle = "#FFF4F4"
         ctx.font = "bold 56px 'Courier New', monospace"
-        ctx.fillText(marketNewsHeader(marketNews), W / 2, 75)
-
+        ctx.fillText("◆ ANNOUNCEMENT ◆", W / 2, 75)
         ctx.fillStyle = TEXT_BRIGHT
         ctx.font = "bold 46px 'Courier New', monospace"
-        const words = marketNews.message.split(/\s+/).filter(Boolean)
-        const lines: string[] = []
-        for (const word of words) {
-            const at = lines.length - 1
-            const candidate = at < 0 ? word : `${lines[at]} ${word}`
-            if (at < 0 || ctx.measureText(candidate).width > W - 180) lines.push(word)
-            else lines[at] = candidate
-        }
-        const visible = lines.slice(0, 3)
-        if (lines.length > visible.length && visible.length > 0) {
-            visible[visible.length - 1] = `${visible[visible.length - 1]!.replace(/[.…]+$/, "")}…`
-        }
-        // Raised from 202: that start allowed for the subtitle line that used to
-        // sit at 143. Three lines from here still finish above SCREEN_CONTENT_BOTTOM.
-        visible.forEach((line, index) => ctx.fillText(line, W / 2, 175 + index * 60, W - 180))
+        // Three lines from here still finish above SCREEN_CONTENT_BOTTOM.
+        wrapLines(ctx, bulletin, W - 180, 3).forEach((line, index) => ctx.fillText(line, W / 2, 175 + index * 60, W - 180))
         return
-    }
-    // The podium outranks everything but a bulletin: once the ceremony starts
-    // the wall has one job until it ends.
-    if (winners) {
-        drawWinnersPage(ctx, winners)
-        return
-    }
-    // The running order outranks every page and the pin: presentations are the
-    // one part of the day the wall has nothing else to say about. A bulletin
-    // still takes it — "five minutes to lunch" matters mid-presentation too.
-    if (presentation) {
-        drawPresentationPage(ctx, presentation)
-        return
-    }
-    if (isBoardPage(page)) drawLeaderboardPage(ctx, page, board)
-    else if (drawCountdownPage(ctx, session, countdown)) return // the final minute owns the whole panel
-    drawScreenSkirt(ctx, page)
-}
-
-/**
- * The podium, as three blocks in the classic arrangement — second, first,
- * third — each wearing its medal colour, with the team's name over it once
- * that place has been read and a "?" until then. The title turns to
- * congratulations once the winner is up.
- */
-function drawWinnersPage(ctx: CanvasRenderingContext2D, board: WinnersBoard) {
-    const W = SCREEN_TEX_W
-    ctx.fillStyle = board.complete ? "rgba(255,210,74,0.12)" : "rgba(40,64,168,0.14)"
-    ctx.fillRect(12, 12, W - 24, SCREEN_CONTENT_BOTTOM + 40)
-    ctx.fillStyle = rankNumeralCssColor(1)
-    ctx.font = "bold 60px 'Courier New', monospace"
-    ctx.fillText(board.complete ? "★ CONGRATULATIONS ★" : "◆ AND THE WINNERS ARE ◆", W / 2, 84)
-
-    // Left to right: 2nd, 1st, 3rd — the way a podium stands.
-    const columns: Array<{ place: 1 | 2 | 3; cx: number; blockH: number }> = [
-        { place: 2, cx: W * 0.25, blockH: 96 },
-        { place: 1, cx: W * 0.5, blockH: 132 },
-        { place: 3, cx: W * 0.75, blockH: 70 },
-    ]
-    const blockW = W * 0.22
-    const floor = SCREEN_CONTENT_BOTTOM + 6
-    for (const column of columns) {
-        const entry = board.entries.find((candidate) => candidate.place === column.place)!
-        const color = rankNumeralCssColor(column.place)
-        const top = floor - column.blockH
-        ctx.fillStyle = entry.label ? color : "rgba(42,58,120,0.55)"
-        ctx.fillRect(column.cx - blockW / 2, top, blockW, column.blockH)
-        ctx.fillStyle = entry.label ? "#020510" : "#2A3A78"
-        ctx.font = "bold 44px 'Courier New', monospace"
-        ctx.fillText(ordinal(column.place), column.cx, top + column.blockH / 2 + 16)
-        if (entry.label) {
-            ctx.fillStyle = TEXT_BRIGHT
-            ctx.font = "bold 40px 'Courier New', monospace"
-            ctx.fillText(entry.label, column.cx, top - 22, blockW - 16)
-            ctx.fillStyle = color
-            ctx.font = "bold 24px 'Courier New', monospace"
-            ctx.fillText(podiumLabel(column.place), column.cx, top - 66)
-        } else {
-            ctx.fillStyle = "#2A3A78"
-            ctx.font = "bold 52px 'Courier New', monospace"
-            ctx.fillText("?", column.cx, top - 22)
-        }
-    }
-}
-
-/**
- * The presentation running order, or — while a team is on stage — that team.
- *
- * With a spotlight the wall is a title card: the whole room reads which team
- * is up from the back. Without one it is the order, as chips across the band:
- * up to six across in one row, two rows past that (the roster runs to a
- * dozen), each reading "?" until the sweep in the room has reached it, so the
- * wall reveals at the same pace as the desks.
- */
-function drawPresentationPage(ctx: CanvasRenderingContext2D, board: PresentationBoard) {
-    const W = SCREEN_TEX_W
-    if (board.spotlight) {
-        ctx.fillStyle = "rgba(255,106,213,0.14)"
-        ctx.fillRect(12, 12, W - 24, SCREEN_CONTENT_BOTTOM + 40)
-        ctx.fillStyle = PRESENTATION_CSS_COLOR
-        ctx.font = "bold 56px 'Courier New', monospace"
-        ctx.fillText("◆ NOW PRESENTING ◆", W / 2, 84)
-        ctx.fillStyle = TEXT_BRIGHT
-        ctx.font = "bold 132px 'Courier New', monospace"
-        ctx.fillText(board.spotlight.label, W / 2, 228, W - 160)
-        ctx.fillStyle = "#A0B8FF"
-        ctx.font = "48px 'Courier New', monospace"
-        ctx.fillText(`${ordinal(board.spotlight.slot)} OF ${board.entries.length}`, W / 2, 306)
-        if (board.doneCount > 0) {
-            ctx.fillStyle = PRESENTATION_DONE_CSS_COLOR
-            ctx.font = "bold 34px 'Courier New', monospace"
-            ctx.textAlign = "right"
-            ctx.fillText(`${board.doneCount}/${board.total} DONE`, W - 100, 84)
-            ctx.textAlign = "center"
-        }
-        return
-    }
-
-    ctx.fillStyle = PRESENTATION_CSS_COLOR
-    ctx.font = "bold 72px 'Courier New', monospace"
-    ctx.fillText("◆ PRESENTATION ORDER ◆", W / 2, 100)
-    // How far down the order the afternoon has got, once it has started —
-    // before the first team is marked off there is no progress to report.
-    if (board.doneCount > 0) {
-        ctx.fillStyle = PRESENTATION_DONE_CSS_COLOR
-        ctx.font = "bold 40px 'Courier New', monospace"
-        ctx.textAlign = "right"
-        ctx.fillText(`${board.doneCount}/${board.total} DONE`, W - 100, 100)
-        ctx.textAlign = "center"
-    }
-    ctx.fillStyle = "#2840A8"
-    ctx.fillRect(90, 132, W - 180, 5)
-
-    const entries = board.entries
-    if (entries.length === 0) return
-    const perRow = entries.length <= 6 ? entries.length : Math.ceil(entries.length / 2)
-    const rows = entries.length <= 6 ? 1 : 2
-    const chipW = (W - 160) / perRow
-    const rowY = rows === 1 ? [232] : [200, 292]
-    entries.forEach((entry, i) => {
-        const row = Math.floor(i / perRow)
-        const col = i % perRow
-        const cx = 80 + chipW * (col + 0.5)
-        const y = rowY[row]!
-        const left = cx - chipW / 2 + 6
-        const w = chipW - 12
-        ctx.fillStyle = entry.live
-            ? "rgba(255,106,213,0.28)"
-            : entry.done
-                ? "rgba(47,156,90,0.18)"
-                : "rgba(40,64,168,0.16)"
-        ctx.fillRect(left, y - 54, w, 76)
-        if (!entry.revealed) {
-            // Waiting for the light: the slot is known, the team is not yet.
-            ctx.fillStyle = "#2A3A78"
-            ctx.font = "bold 44px 'Courier New', monospace"
-            ctx.fillText("?", cx, y - 8)
-            return
-        }
-        // A finished team is ticked and greened. The rest of the chip is
-        // unchanged — the room still has to be able to read who was third.
-        ctx.fillStyle = entry.done ? PRESENTATION_DONE_CSS_COLOR : PRESENTATION_CSS_COLOR
-        ctx.font = "bold 40px 'Courier New', monospace"
-        ctx.fillText(entry.done ? `✓ ${entry.slot}` : `${entry.slot}`, cx, y - 14)
-        ctx.fillStyle = entry.done ? "#8FA8E8" : TEXT_BRIGHT
-        ctx.font = "bold 30px 'Courier New', monospace"
-        ctx.fillText(entry.label, cx, y + 14, w - 12)
-    })
-}
-
-/**
- * The clock page: the running trading window's countdown, or — with no window
- * — the countdown to launch day. Returns true when it has taken the whole
- * panel for its final minute, which is the caller's cue to skip the skirt and
- * its page dots: a screen showing one number should not also be advertising
- * that it has another page.
- */
-function drawCountdownPage(
-    ctx: CanvasRenderingContext2D,
-    session: SessionClockSnapshot | null,
-    countdown: ScreenCountdown | undefined,
-): boolean {
-    const W = SCREEN_TEX_W
-    const lines = screenLines(session, Date.now(), countdown)
-    if (lines.solo) {
-        // The last minute: nothing on the wall but the count, filling the band the
-        // title and subtitle vacated. Centred on the readable band rather than sat
-        // on its baseline, so it does not drift down into the dead band.
-        ctx.fillStyle = lines.color
-        ctx.font = "bold 280px 'Courier New', monospace"
-        ctx.textBaseline = "middle"
-        ctx.fillText(lines.readout, W / 2, SCREEN_CONTENT_BOTTOM / 2 + 24)
-        ctx.textBaseline = "alphabetic"
-        return true
     }
     ctx.fillStyle = TEXT_BRIGHT
     ctx.font = "bold 96px 'Courier New', monospace"
-    ctx.fillText(roomTitle(), W / 2, 128)
+    ctx.fillText(board?.title ?? roomTitle(), W / 2, 128, W - 160)
     ctx.fillStyle = "#2840A8"
     ctx.fillRect(90, 166, W - 180, 5)
-    // The launch date (or the window's state) rides alongside the label rather
-    // than on its own bottom line, down in the dead band.
     ctx.fillStyle = "#A0B8FF"
     ctx.font = "48px 'Courier New', monospace"
-    ctx.fillText(lines.subtitle, W / 2, 234)
-    ctx.fillStyle = lines.color
-    ctx.font = "bold 108px 'Courier New', monospace"
-    ctx.fillText(lines.readout, W / 2, SCREEN_CONTENT_BOTTOM)
-    return false
-}
-
-/**
- * The live leaderboard: the top teams as cards across the wide band.
- *
- * The screen is a 4:1 letterbox with only its top third legible, so the board
- * runs SIDEWAYS — five columns, not five rows. A vertical table would push
- * fourth and fifth place down into the unreadable band.
- */
-function drawLeaderboardPage(
-    ctx: CanvasRenderingContext2D,
-    page: ScreenPage,
-    board: readonly ScreenBoardRow[],
-) {
-    const W = SCREEN_TEX_W
-    ctx.fillStyle = TEXT_GOLD
-    ctx.font = "bold 72px 'Courier New', monospace"
-    ctx.fillText(boardTitle(page), W / 2, 100)
-    ctx.fillStyle = "#2840A8"
-    ctx.fillRect(90, 132, W - 180, 5)
-
-    if (board.length === 0) {
-        ctx.fillStyle = "#A0B8FF"
-        ctx.font = "56px 'Courier New', monospace"
-        ctx.fillText("AWAITING FIRST TRADING WINDOW", W / 2, 250)
-        return
-    }
-
-    // Five slots always, so the cards keep their places as teams come and go.
-    const SLOTS = 5
-    const cardW = (W - 160) / SLOTS
-    board.slice(0, SLOTS).forEach((row, i) => {
-        const cx = 80 + cardW * (i + 0.5)
-        const left = cx - cardW / 2 + 8
-        const w = cardW - 16
-        // The podium gets the medal its desk numeral already wears; everyone else
-        // gets the field colour, so a card and a desk never disagree about a
-        // placing. Ranks are absolute, so this reads the row rather than the slot
-        // — sixth place on the lower board is not a first place.
-        const medal = rankNumeralCssColor(row.rank)
-        ctx.fillStyle = row.rank === 1 ? "rgba(255,208,64,0.14)" : "rgba(40,64,168,0.16)"
-        ctx.fillRect(left, 154, w, 182)
-        // The team's own colour, as a rule along the top of its card: the same
-        // swatch /results puts beside the name, so a team can be picked out of the
-        // board from across the room without reading a label.
-        ctx.fillStyle = row.color
-        ctx.fillRect(left, 154, w, 7)
-        ctx.fillStyle = medal
-        ctx.font = "bold 44px 'Courier New', monospace"
-        ctx.fillText(`${row.rank}`, cx, 200)
-        ctx.fillStyle = TEXT_BRIGHT
-        ctx.font = "bold 42px 'Courier New', monospace"
-        ctx.fillText(row.label, cx, 244)
-        ctx.fillStyle = row.down ? TEXT_LOSS : TEXT_GAIN
-        ctx.font = "bold 48px 'Courier New', monospace"
-        ctx.fillText(row.pnl, cx, 292)
-        // The PnL is what teams are ranked on; the book value rides under it in
-        // the quiet grey of a footnote.
-        ctx.fillStyle = "#8FA8E8"
-        ctx.font = "32px 'Courier New', monospace"
-        ctx.fillText(row.value, cx, 324)
-    })
-}
-
-/**
- * The panel below the content fades out rather than ending on a hard edge, so
- * the part down by the plinth reads as screen, not as a gap. The page dots
- * ride at the top of it — the only hint that the screen has another page,
- * placed just high enough to stay in the readable band.
- */
-function drawScreenSkirt(ctx: CanvasRenderingContext2D, page: ScreenPage) {
-    const W = SCREEN_TEX_W, H = SCREEN_TEX_H
+    const lines = (board?.lines ?? []).slice(0, BOARD_MAX_LINES)
+    lines.forEach((line, index) => ctx.fillText(line, W / 2, 226 + index * 50, W - 180))
+    // The panel below the content fades out rather than ending on a hard edge,
+    // so the part down by the plinth reads as screen, not as a gap.
     const skirt = ctx.createLinearGradient(0, SCREEN_CONTENT_BOTTOM + 24, 0, H)
     skirt.addColorStop(0, "rgba(40,64,168,0.20)")
     skirt.addColorStop(1, "rgba(4,8,24,0)")
     ctx.fillStyle = skirt
     ctx.fillRect(12, SCREEN_CONTENT_BOTTOM + 24, W - 24, H - SCREEN_CONTENT_BOTTOM - 36)
-    const at = SCREEN_PAGES.indexOf(page)
-    const dotGap = 34
-    const x0 = W / 2 - (dotGap * (SCREEN_PAGES.length - 1)) / 2
-    SCREEN_PAGES.forEach((_, i) => {
-        ctx.fillStyle = i === at ? "#A0B8FF" : "#2A3A78"
-        ctx.beginPath()
-        ctx.arc(x0 + dotGap * i, SCREEN_CONTENT_BOTTOM + 46, 9, 0, Math.PI * 2)
-        ctx.fill()
-    })
 }
 
 // ---------------------------------------------------------------- post fx
@@ -1014,90 +618,17 @@ const SEL_TAG_RISE = 1.24
 /** Area headings (team tables, the arrivals platform) float this far overhead. */
 const AREA_LABEL_Y = NOMINAL_CHARACTER_TOP_Y + 0.64
 
-// The floating rank numeral over a desk. It hangs over the middle of the
-// desktop at about head height — high enough to clear the laptops, low enough
-// to stay under the warm pools the room hangs over each desk row (point lights
-// at y 5.4, intensity 55). Level with the name plate it was inside one of
-// those pools and rendered as an orange blob rather than a placing.
-/** World units per cell of the numeral's 3×5 pixel grid — see rank-numerals.ts. */
-const RANK_CELL = 0.32
-/** How far the block is extruded, so the numeral has real depth to turn in. */
-const RANK_DEPTH = 0.24
-/** Height of the numeral's centre, a head under the team's name plate. */
-const RANK_NUMERAL_Y = NOMINAL_CHARACTER_TOP_Y - 0.55
-/**
- * How far south of the desk's middle the numeral floats. The team's name plate
- * hangs at the same spot dead centre, so a step toward the camera puts the
- * placing clearly in FRONT of the plate instead of growing through it.
- */
-const RANK_NUMERAL_Z = 1.55
-/** Amplitude and pace of the hover bob. */
-const RANK_BOB = 0.11
-const RANK_BOB_SPEED = 1.6
-/**
- * The numeral SWAYS through this many radians rather than spinning: a full
- * turn shows the camera a mirrored digit for half of every revolution, which
- * is a poor way to tell someone they are in 2nd place. A sway still catches
- * the light on the extruded sides, which is the whole point of a 3D numeral.
- */
-const RANK_SWAY = 0.42
-const RANK_SWAY_SPEED = 0.9
 
 // WALK_SPEED now lives in lib/gameRoomNet/wander.ts, shared with the
 // multiplayer hub so the server-side wander walks the same gait.
 /** Simulation steps per sprite frame: the walk cycle at WALK_SPEED = 1. */
 const WALK_FRAME_STEPS = 6
-/** How far a dragged character lifts off its standing height. */
-const DRAG_LIFT = 0.24
 /** Peak of the hop a character makes when it moves between two seats. */
 const TRANSITION_HOP = 0.7
 
 /** How much of its colour and light an unused desk keeps — see team-tables.ts. */
 const EMPTY_TABLE_FADE = 0.42
 
-// The presentation spotlight. A real SpotLight from high over the desk — the
-// room's furniture and characters are Lambert/Standard, so it lights them —
-// plus a beam and a floor pool drawn as additive geometry, because a light
-// alone is invisible in air and the point of a spotlight is that you see it.
-/** How high over the floor the spot hangs. */
-const SPOT_HEIGHT = 17
-/** Radius of the pool it throws on the floor: a desk and the people at it. */
-const SPOT_RADIUS = 3.2
-/**
- * Candela, against SPOT_DECAY's inverse-square falloff — so what reaches the
- * desk seventeen units below is 900/17², a few times the desk pools' own
- * 34/5.4². Bright enough to be the brightest thing in the room, and nothing
- * like the 45× it was throwing while the falloff was linear.
- */
-const SPOT_INTENSITY = 900
-/**
- * Inverse square, like every other light the room hangs.
- *
- * It was linear, which is what made the reveal wash out: a fixture this
- * powerful with a 42-unit reach and no real falloff was not lighting one desk,
- * it was lighting the whole room from above — the pool blew out to flat white.
- */
-const SPOT_DECAY = 2
-/** How dark the house goes: 1 would be black, and the brief was "still a bit
- * visible" — the room stays legible, the spotlight just owns it. */
-const ROOM_DIM_DEPTH = 0.86
-/** How far down the house lights go for the winners' ceremony (0..1). */
-const WINNERS_HOUSE_DIM = 0.5
-/**
- * How recently a place must have been read for a screen to fire its volley.
- * A tab that connects a minute into the ceremony shows the podium as it
- * stands rather than replaying every burst the room has already seen.
- */
-const VOLLEY_REPLAY_WINDOW_MS = 15_000
-/** How fast the house lights fade, per second (exponential approach). */
-const ROOM_DIM_RATE = 3.2
-/** How fast the spot slides between desks, per second. Snappy: a light that
- * drifts reads as a search, and this one knows where it is going. */
-const SPOT_SLIDE_RATE = 7
-/** A desk numeral pops in over this long when the spotlight lands on it. */
-const NUMERAL_POP_MS = 420
-/** The screen's glow into the room, at full house lights. */
-const SCREEN_GLOW_INTENSITY = 34
 
 /**
  * Baseline for measuring how far the floor moves per pixel of pointer travel.
@@ -1118,10 +649,7 @@ interface CharState {
     pauseLeft: number
     rng: number
     teamIdx: number | null
-    lobbyOrdinal: number | null
     playerIdx: number
-    draggable: boolean
-    busy: boolean
     name: string
     role: RoomRole
     presenceHalo: THREE.Mesh
@@ -1143,10 +671,6 @@ async function loadTexture(loader: THREE.TextureLoader, url: string): Promise<TH
 }
 
 export async function createRoomScene(container: HTMLElement, opts: CreateRoomOptions): Promise<RoomSceneHandle> {
-    const interactionMode = opts.interactionMode ?? "select"
-    const assignmentLayout = interactionMode === "assign"
-        ? assignmentSceneLayout(opts.players.length)
-        : null
     const cleanupCallbacks: Array<() => void> = []
     let cleanedUp = false
     const runCleanup = (cleanup: () => void) => {
@@ -1252,38 +776,18 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         // the background doubles as the last line of haze wherever the frame looks
         // past the backdrop's shell.
         scene.background = new THREE.Color(0x05070f)
-        // Select mode's fog brackets scale off the room depth — the doubled room
-        // put the far wall where the old fixed 52 began, which read as a smoky far
-        // half rather than city haze.
-        scene.fog = new THREE.Fog(
-            0x05070f,
-            assignmentLayout ? Math.max(52, assignmentLayout.camera.distance * 1.25) : ROOM_D * 2,
-            assignmentLayout ? Math.max(96, assignmentLayout.camera.far * 0.75) : ROOM_D * 3.7,
-        )
+        // The fog brackets scale off the room depth, so the far wall reads as
+        // city haze rather than a smoky far half.
+        scene.fog = new THREE.Fog(0x05070f, ROOM_D * 2, ROOM_D * 3.7)
 
-        // fixed, front-facing camera — assignment mode widens just enough to include
-        // arrivals. The far plane clears the backdrop's haze shell (r=520), not just
-        // the room: the old 200 would cull the city outside.
-        const camera = new THREE.PerspectiveCamera(assignmentLayout?.camera.fov ?? 45, CW / CH, 0.1, 1400)
-        if (assignmentLayout) {
-            camera.position.set(
-                assignmentLayout.camera.positionX,
-                assignmentLayout.camera.positionY,
-                assignmentLayout.camera.positionZ,
-            )
-            camera.lookAt(assignmentLayout.camera.targetX, 0.6, assignmentLayout.camera.targetZ)
-        } else {
-            // Higher and a touch further back than the old (21, +19.5): the doubled
-            // depth needs the extra altitude for the far rows to clear the near ones.
-            camera.position.set(0, 34, ROOM_D + 24)
-            camera.lookAt(0, 0.6, ROOM_D * 0.4)
-        }
+        // Fixed, front-facing camera. The far plane clears the backdrop's haze
+        // shell (r=520), not just the room: 200 would cull the city outside.
+        const camera = new THREE.PerspectiveCamera(45, CW / CH, 0.1, 1400)
+        // High and a touch back, so the far rows clear the near ones.
+        camera.position.set(0, 34, ROOM_D + 24)
+        camera.lookAt(0, 0.6, ROOM_D * 0.4)
         const cameraHomePosition = camera.position.clone()
-        const cameraHomeTarget = new THREE.Vector3(
-            assignmentLayout?.camera.targetX ?? 0,
-            0.6,
-            assignmentLayout?.camera.targetZ ?? ROOM_D * 0.4,
-        )
+        const cameraHomeTarget = new THREE.Vector3(0, 0.6, ROOM_D * 0.4)
 
         // ---- the city outside ----------------------------------------------------
         // Rings of skyline below the room, centred on the camera's home so a pan
@@ -1296,9 +800,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             track,
             {
                 // The rings must wrap outside the far corner of the floor slab, or the
-                // room's far end disappears behind a silhouette tower (assignment
-                // mode's pulled-back camera used to do exactly that on the doubled
-                // room).
+                // room's far end disappears behind a silhouette tower.
                 clearRadius: Math.hypot(
                     Math.abs(cameraHomePosition.x) + ROOM_W / 2,
                     cameraHomePosition.z + NORTH_APRON,
@@ -1307,30 +809,15 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             },
         )
         const todOverride = parseTimeOverride(window.location.search)
-        const clockMinute = () => todOverride ?? sgtMinutes(new Date())
+        const clockMinute = () => todOverride ?? localMinutes(new Date())
         let paletteMinute = -1
-        let paletteNight = -1
-        // How far the sky has been pushed to night for the winners' ceremony: 0 is
-        // the clock outside, 1 is the lit-city night the fireworks want. Eased
-        // towards its goal every frame rather than cut, and back again when the
-        // ceremony ends, so the room never visibly snaps between two evenings.
-        let nightBlend = 0
-        let nightGoal = 0
-        // The palette in force, kept so the house lights can be dimmed and brought
-        // back to it — the presentation spotlight dims the room, and "back up" has
-        // to mean the same evening the clock outside says it is.
+        // The palette in force, so the lights can be retuned to it.
         let palette: ReturnType<typeof skyPalette> | null = null
-        // What the clock page counts to with no window running: launch day unless
-        // the route hands in the doors (undefined = screenLines's launch default).
-        let countdown: ScreenCountdown | undefined = undefined
         const applyTimeOfDay = () => {
             const minute = clockMinute()
-            if (minute === paletteMinute && nightBlend === paletteNight) return
+            if (minute === paletteMinute) return
             paletteMinute = minute
-            paletteNight = nightBlend
-            const p = nightBlend > 0
-                ? mixPalette(skyPalette(minute), skyPalette(NIGHT_SHOW_MINUTE), nightBlend)
-                : skyPalette(minute)
+            const p = skyPalette(minute)
             palette = p
             backdrop.applyPalette(p)
                 ; (scene.background as THREE.Color).setHex(p.haze)
@@ -1410,7 +897,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const rightGlass = buildGlassWall(ROOM_D, WALL_H)
         rightGlass.rotation.y = -Math.PI / 2
         rightGlass.position.set(ROOM_W / 2, 0, ROOM_D / 2)
-        if (interactionMode === "select") scene.add(rightGlass)
+        scene.add(rightGlass)
 
         // ---- the rest of our own tower -------------------------------------------
         // With a real city outside, a floor plane ending in mid-air reads as a
@@ -1419,21 +906,15 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         // into a floor OF something. The top stays open — the camera looks down
         // into the room, so a ceiling would be all it ever saw.
         {
-            // Assignment mode grows the building sideways to carry the arrivals
-            // platform; it is all one floor plate.
             const plateWest = -ROOM_W / 2
-            const plateEast = assignmentLayout
-                ? assignmentLayout.lobbyStartX + assignmentLayout.lobbyWidth + 0.6
-                : ROOM_W / 2
+            const plateEast = ROOM_W / 2
             const plateNorth = -NORTH_APRON
             // The slab runs past the south glass line by as much as the camera may pan
             // that way (plus margin for the widest zoom), so panning down always lands
             // the bottom of the frame on structure. Without it, buying enough southward
             // pan to keep the last row's characters in frame would buy a view of the
             // tower's blank south face as well.
-            const plateSouth = assignmentLayout
-                ? Math.max(ROOM_D, assignmentLayout.lobbyDepth)
-                : ROOM_D + ROOM_CAMERA_MAX_PAN_SOUTH + 3
+            const plateSouth = ROOM_D + ROOM_CAMERA_MAX_PAN_SOUTH + 3
             const plateW = plateEast - plateWest
             const plateD = plateSouth - plateNorth
             const plateX = (plateWest + plateEast) / 2
@@ -1444,8 +925,8 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             const fasciaSpans: Array<[w: number, x: number, z: number, rotY: number]> = [
                 [ROOM_W + 0.7, 0, 0, 0],
                 [ROOM_D + 0.7, -ROOM_W / 2, ROOM_D / 2, Math.PI / 2],
+                [ROOM_D + 0.7, ROOM_W / 2, ROOM_D / 2, Math.PI / 2],
             ]
-            if (interactionMode === "select") fasciaSpans.push([ROOM_D + 0.7, ROOM_W / 2, ROOM_D / 2, Math.PI / 2])
             for (const [w, x, z, rotY] of fasciaSpans) {
                 const fascia = new THREE.Mesh(track(new THREE.BoxGeometry(w, 0.85, 0.5)), fasciaMat)
                 fascia.position.set(x, WALL_H + 0.28, z)
@@ -1476,49 +957,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             }
         }
 
-        // Assignment arrivals are on an open platform immediately outside the
-        // room. The missing right wall is the entrance; there is intentionally no
-        // gate, rope, or attendant blocking it.
-        let lobbyHitbox: THREE.Mesh | null = null
-        let lobbyHighlight: THREE.Mesh | null = null
-        if (assignmentLayout) {
-            const lobbyFloor = new THREE.Mesh(
-                track(new THREE.PlaneGeometry(assignmentLayout.lobbyWidth, assignmentLayout.lobbyDepth)),
-                track(surfaceMaterial({ color: 0x17234f, roughness: 0.92, metalness: 0.05 })),
-            )
-            lobbyFloor.rotation.x = -Math.PI / 2
-            lobbyFloor.position.set(assignmentLayout.lobbyStartX + assignmentLayout.lobbyWidth / 2, 0.025, assignmentLayout.lobbyDepth / 2)
-            lobbyFloor.receiveShadow = true
-            scene.add(lobbyFloor)
-
-            const platformEdgeMat = track(new THREE.MeshBasicMaterial({ color: 0x5070e0, toneMapped: false }))
-            const platformEdgeGeo = track(new THREE.BoxGeometry(0.12, 0.12, assignmentLayout.lobbyDepth))
-            const platformEdge = new THREE.Mesh(platformEdgeGeo, platformEdgeMat)
-            platformEdge.position.set(assignmentLayout.lobbyStartX + assignmentLayout.lobbyWidth - 0.06, 0.08, assignmentLayout.lobbyDepth / 2)
-            scene.add(platformEdge)
-
-            lobbyHitbox = new THREE.Mesh(
-                track(new THREE.BoxGeometry(assignmentLayout.lobbyWidth, 0.5, assignmentLayout.lobbyDepth)),
-                track(new THREE.MeshBasicMaterial({ visible: false })),
-            )
-            lobbyHitbox.position.set(assignmentLayout.lobbyStartX + assignmentLayout.lobbyWidth / 2, 0.25, assignmentLayout.lobbyDepth / 2)
-            scene.add(lobbyHitbox)
-
-            lobbyHighlight = new THREE.Mesh(
-                track(new THREE.PlaneGeometry(assignmentLayout.lobbyWidth - 0.25, assignmentLayout.lobbyDepth - 0.25)),
-                track(new THREE.MeshBasicMaterial({ color: 0xffd040, transparent: true, opacity: 0.22, depthWrite: false, toneMapped: false })),
-            )
-            lobbyHighlight.rotation.x = -Math.PI / 2
-            lobbyHighlight.position.set(assignmentLayout.lobbyStartX + assignmentLayout.lobbyWidth / 2, 0.055, assignmentLayout.lobbyDepth / 2)
-            lobbyHighlight.visible = false
-            scene.add(lobbyHighlight)
-
-            const arrivalsTex = track(makeLabelTexture("ARRIVALS", false))
-            const arrivalsLabel = new THREE.Sprite(track(new THREE.SpriteMaterial({ map: arrivalsTex, depthTest: true })))
-            arrivalsLabel.scale.set(3.2, 0.88, 1)
-            arrivalsLabel.position.set(assignmentLayout.lobbyStartX + assignmentLayout.lobbyWidth / 2, AREA_LABEL_Y, 1.1)
-            scene.add(arrivalsLabel)
-        }
 
         // centre aisle rugs — one per gap between table rows, derived from the plan
         // so they follow the rows wherever the layout puts them
@@ -1548,210 +986,19 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         screenCanvas.width = SCREEN_TEX_W
         screenCanvas.height = SCREEN_TEX_H
         const screenCtx = screenCanvas.getContext("2d")!
-        // Which page this client's screen is on, and the board it draws. Both are
-        // local: the page turns for whoever pressed interact, nobody else.
-        let screenPage: ScreenPage = SCREEN_PAGES[0]
-        // The standings as the poll last handed them over, unsliced: which five of
-        // them the screen wants depends on the page it is on, and the page turns
-        // more often than the poll lands.
-        let screenRows: readonly ExLeaderboardRow[] = []
-        // The trading window's clock, pushed in by the route's 5s poll; the page
-        // ticks the seconds off its timestamp in between.
-        let sessionClock: SessionClockSnapshot | null = null
-        // A public exchange announcement takes the panel over briefly. Its lifetime
-        // is owned by useMarketNews; the scene only paints the latest value it gets.
-        let marketNews: MarketNews | null = null
-        // The filmed broadcast for a scripted market event, while one is playing.
-        // Only set once the element actually has a frame — until then the banner and
-        // its text hold the wall, so the screen never goes black waiting on bytes.
-        let newsVideo: HTMLVideoElement | null = null
-        // The element the room OWNS, from the moment it is created — which is not the
-        // same as the one being drawn. A clip takes a moment to reach its first
-        // frame, and a second market event can land inside that moment; tearing down
-        // only what had already loaded left the still-loading element in the page,
-        // where it went on to load, play, and seize the screen from the event that
-        // replaced it. Firing three events a few seconds apart left three clips
-        // playing at once. Ownership is tracked here so teardown is unconditional.
-        let newsVideoEl: HTMLVideoElement | null = null
-        // The clip the room is MEANT to be playing, kept so a broadcast that could
-        // not start can be started again later. See the visibilitychange handler.
-        let newsClip: MarketNewsClip | null = null
-        // The site's effects settings, pushed in by the route. Defaults to muted so
-        // a broadcast that somehow starts before the first push cannot be the thing
-        // that makes noise in a silent room.
-        let newsAudio = { muted: true, volume: 0.8 }
+        /** The wall's resting page, or null for the room's title alone. */
+        let board: RoomBoard | null = null
+        /** The bulletin up on the wall, or null while it shows the board. */
+        let bulletinText: string | null = null
         // Whether the auto-frame on the wall was OURS to release. A player who
-        // presses Escape mid-broadcast has taken the camera back, and the clip
-        // ending must not yank it away from wherever they went.
-        let newsFocusHeld = false
-        /** The camera is on the wall because the winners' ceremony put it there. */
-        let winnersFocusHeld = false
-        // The screen turns its own pages on a timer; interact just takes the wheel,
-        // which is why a press resets the dwell rather than stopping the cycle —
-        // whoever pressed gets the full reading time on the page they asked for.
-        let screenPageAt = performance.now()
-        /**
-         * A page the gamemaster has pinned for the whole room, or null while the
-         * players own the wall. While it is set nothing else moves the page — see
-         * setForcedScreenPage on the handle for why it is absolute.
-         */
-        let forcedScreenPage: ScreenPage | null = null
+        // presses Escape mid-bulletin has taken the camera back, and the bulletin
+        // coming down must not yank it away from wherever they went.
+        let bulletinFocusHeld = false
         const redrawScreen = () => {
-            drawScreenCanvas(
-                screenCtx,
-                screenPage,
-                boardRows(screenRows, screenPage),
-                sessionClock,
-                countdown,
-                marketNews,
-                broadcastPicture.visible,
-                presentation ? presentationBoard(presentation, opts.teamLabels, Date.now()) : null,
-                winners ? winnersBoard(winners, opts.teamLabels) : null,
-            )
+            drawScreenCanvas(screenCtx, board, bulletinText)
             screenTex.needsUpdate = true
         }
-        /**
-         * Take the broadcast down and give the wall back to its pages.
-         *
-         * Called from every way a clip can end — its own `ended` event, a decoding
-         * error, the bulletin being released or replaced, and the scene being
-         * disposed — so the element is never left playing audio into a room that has
-         * moved on.
-         */
-        const stopNewsVideo = () => {
-            // The OWNED element, not the drawn one: a clip still loading has no frame
-            // yet and would otherwise survive this and hijack the wall later.
-            const video = newsVideoEl
-            newsVideoEl = null
-            newsVideo = null
-            newsClip = null
-            clearBroadcastPicture()
-            // Back to framing the whole wall for whoever is still standing at it.
-            if (screenFocusT > 0) syncCamera()
-            if (video) {
-                video.pause()
-                // Dropping the src and reloading is what actually releases the network
-                // request and the decoder; removing the element alone does not.
-                video.removeAttribute("src")
-                video.load()
-                video.remove()
-            }
-            if (newsFocusHeld) {
-                newsFocusHeld = false
-                setScreenFocus(false)
-            }
-            redrawScreen()
-        }
-
-        const startNewsVideo = (clip: MarketNewsClip) => {
-            stopNewsVideo()
-            const video = document.createElement("video")
-            video.src = clip.webm
-            // playsInline keeps iOS from throwing the clip into its own fullscreen
-            // player, which would take the room off the screen entirely.
-            video.playsInline = true
-            video.preload = "auto"
-            video.muted = newsAudio.muted
-            video.volume = newsAudio.volume
-
-            // Ownership, not drawn-ness: an element that errors before its first frame
-            // still has to be torn down, and one the room has already moved on from
-            // must not tear down its successor.
-            const fail = () => { if (newsVideoEl === video) stopNewsVideo() }
-            video.addEventListener("ended", fail, { once: true })
-            video.addEventListener("error", fail, { once: true })
-            // Not "playing" but the first frame being decodable: `playing` can fire
-            // before videoWidth is known, and drawing a 0x0 source throws.
-            video.addEventListener("loadeddata", () => {
-                // A frame from a clip the room has already replaced is not wanted, however
-                // late it arrives.
-                if (newsVideoEl !== video) return
-                newsVideo = video
-                showBroadcastPicture(video)
-                // The framed pose is measured from the picture, so it changes the moment
-                // there is one — re-sync rather than waiting for the next thing to move
-                // the camera.
-                if (screenFocusT > 0) syncCamera()
-                // The room's furniture hides the bottom of the screen from a normal
-                // camera, so a broadcast that filled it would lose the anchor's desk.
-                // Framing the wall also hides those occluders — see screenFocusHidesRoom.
-                if (!screenFocused) {
-                    newsFocusHeld = true
-                    setScreenFocus(true)
-                }
-                redrawScreen()
-            })
-
-            newsVideoEl = video
-            newsClip = clip
-            video.style.display = "none"
-            document.body.appendChild(video)
-            void video.play().catch(() => {
-                // Autoplay with sound needs a gesture the page may not have had yet.
-                // A silent broadcast is far better than none, and the room's own audio
-                // controls are the user's way back to sound.
-                video.muted = true
-                void video.play().catch(fail)
-            })
-        }
-
-        // Teardown detaches the element directly rather than going through
-        // stopNewsVideo: by the time cleanup runs the screen and the camera it would
-        // touch may already be disposed, and all that matters here is that no clip
-        // is left playing audio into a page that has navigated away.
-        registerCleanup(() => {
-            const video = newsVideoEl
-            newsVideoEl = null
-            newsVideo = null
-            if (!video) return
-            video.pause()
-            video.removeAttribute("src")
-            video.load()
-            video.remove()
-        })
-
-        /**
-         * Chrome does not decode media in a hidden tab.
-         *
-         * A clip started while the room was in the background sits in networkState
-         * LOADING with readyState 0 and never produces a frame — verified with a
-         * bare <video> element and an already-cached file, so this is the browser,
-         * not the room. `loadeddata` therefore never fires and the wall stays on its
-         * text banner, which is exactly what a game master sees when they fire an
-         * event from the console tab with the room behind it.
-         *
-         * Coming back to the foreground is the first moment the clip can actually
-         * play, so that is when it is started again. The bulletin is still current —
-         * a frozen tab does not run its release timer either.
-         */
-        const onVisibilityChange = () => {
-            if (document.hidden) return
-            const clip = newsClip
-            if (clip && !newsVideo) startNewsVideo(clip)
-        }
-        document.addEventListener("visibilitychange", onVisibilityChange)
-        registerCleanup(() => document.removeEventListener("visibilitychange", onVisibilityChange))
-
-        const turnScreenPage = (direction: "next" | "prev" = "next") => {
-            // A pinned wall does not turn — not for the dwell timer, and not for a
-            // player pressing interact in front of it. Nor does the running order:
-            // it is fixed on the wall for as long as presentations run.
-            if (forcedScreenPage || presentation) {
-                redrawScreen()
-                return
-            }
-            // The final minute owns the screen: neither the dwell timer nor an
-            // interact press turns away from a count that is about to hit zero.
-            if (screenLines(sessionClock, Date.now(), countdown).solo) {
-                redrawScreen()
-                return
-            }
-            const turn = direction === "prev" ? prevScreenPage : nextScreenPage
-            screenPage = turn(screenPage, eventStarted(sessionClock), screenRows.length)
-            screenPageAt = performance.now()
-            redrawScreen()
-        }
-        drawScreenCanvas(screenCtx, screenPage, boardRows(screenRows, screenPage), sessionClock, countdown, marketNews)
+        drawScreenCanvas(screenCtx, board, bulletinText)
         const screenTex = track(pixelTexture(new THREE.CanvasTexture(screenCanvas)) as THREE.CanvasTexture)
         // The surround runs from the floor to the wall head: it is the only thing
         // standing on this face now, so anything it fails to cover is a gap onto
@@ -1772,79 +1019,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         screen.position.set(0, SCREEN_CY, 0.33)
         scene.add(screen)
 
-        // ------------------------------------------------------------ broadcast picture
-        // A filmed broadcast is NOT painted onto the screen's canvas. It used to be:
-        // every frame the clip advanced, the video was drawn through a 2D-canvas
-        // filter into the 1920x468 canvas and the whole canvas re-uploaded to the
-        // GPU — and since a <video>'s currentTime is a running clock rather than a
-        // frame counter, "every frame the clip advanced" was every frame the room
-        // rendered. That was the room's lag while a clip played.
-        //
-        // The picture is now its own quad, a hair in front of the screen, carrying
-        // a VideoTexture: the browser hands each decoded frame straight to WebGL at
-        // the clip's own rate, and the wall's canvas is painted once (black, border)
-        // when the clip starts and left alone until it ends. The quad is sized and
-        // placed from the same fit rect the camera frames, so what is drawn and what
-        // is framed still cannot disagree. The picture is shown as filmed — the 90s
-        // tube treatment it once had (scanlines, vignette, a saturation lift) is
-        // gone; the clips are a clean production and read best as one.
-        //
-        // "As filmed" also means outside the room's tone mapping, which the post
-        // chain applies to the whole frame regardless of what a material asks for,
-        // and which left the picture dark. So the picture lives in a scene of its
-        // own, drawn over the room before the output pass with the tone map
-        // pre-inverted (broadcast-picture.ts
-        // has the why and the maths), or straight after the room where there is no
-        // post chain to dodge.
-        const BROADCAST_PICTURE_LIFT = 0.01
-        const broadcastPicture = new THREE.Mesh(
-            track(new THREE.PlaneGeometry(1, 1)),
-            new THREE.MeshBasicMaterial({ toneMapped: false }),
-        )
-        broadcastPicture.visible = false
-        broadcastPicture.position.set(0, SCREEN_CY, screen.position.z + BROADCAST_PICTURE_LIFT)
-        const pictureScene = new THREE.Scene()
-        pictureScene.add(broadcastPicture)
-        // Off until the post chain is built (below), which is the only path that
-        // needs the mapping undone.
-        const pictureUniforms = broadcastPictureUniforms(ROOM_EXPOSURE)
-
-        /** Take the picture down and release its texture and material. */
-        const clearBroadcastPicture = () => {
-            if (!broadcastPicture.visible) return
-            broadcastPicture.visible = false
-            const material = broadcastPicture.material as THREE.MeshBasicMaterial
-            // The texture is disposed first: it is what holds the rVFC subscription on
-            // the element, and the material after it so the two never outlive the clip.
-            material.map?.dispose()
-            material.dispose()
-            broadcastPicture.material = new THREE.MeshBasicMaterial({ toneMapped: false })
-        }
-        registerCleanup(clearBroadcastPicture)
-
-        /**
-         * Put a clip's picture up: sized and placed as it would have been drawn.
-         * Returns false, leaving the wall on its text banner, for a video that has
-         * no dimensions yet — nothing to size a quad from.
-         */
-        const showBroadcastPicture = (video: HTMLVideoElement): boolean => {
-            clearBroadcastPicture()
-            const fit = broadcastFitRect(video.videoWidth, video.videoHeight, SCREEN_TEX_W, SCREEN_TEX_H)
-            if (fit.width <= 0) return false
-            const world = broadcastWorldRect(fit, SCREEN_TEX_W, SCREEN_TEX_H, SCREEN_W, SCREEN_H, SCREEN_CY)
-            broadcastPicture.scale.set(world.width, world.height, 1)
-            broadcastPicture.position.y = world.centreY
-
-            const texture = new THREE.VideoTexture(video)
-            texture.colorSpace = THREE.SRGBColorSpace
-            // Same material as the wall behind it (basic, untonemapped), so the output
-            // colour space treats the picture exactly as they do the panel.
-            const material = new THREE.MeshBasicMaterial({ map: texture, toneMapped: false })
-            material.onBeforeCompile = (shader) => { applyBroadcastPictureShader(shader, pictureUniforms) }
-            broadcastPicture.material = material
-            broadcastPicture.visible = true
-            return true
-        }
         // Twice the glass, twice the throw: a pair of glows so the wall-wide screen
         // lights the room's front end evenly instead of one hot centre pool.
         const screenGlowLights = [-ROOM_W / 4, ROOM_W / 4].map((gx) => {
@@ -2041,96 +1215,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         scene.add(primeyMesh)
         let primeyVisible = true
 
-        /** A character's crowns, by playerIdx, with the set they were built for
-         * so an unchanged wearer is left alone. */
-        const crowns = new Map<number, { kinds: string; meshes: THREE.Mesh[] }>()
-        /** What each character should be wearing, and the role it was worked out
-         * from. Recomputed only when that changes: doing it per character per
-         * frame allocated a list and a string for everybody in the room sixty
-         * times a second, to nearly always the same answer. */
-        const crownWanted = new Map<number, { from: string; crowns: Crown[]; kinds: string }>()
-
-        /** One texture per kind, drawn once and shared by everyone wearing it. */
-        const crownTextures = new Map<string, THREE.CanvasTexture>()
-        const crownTexture = (kind: Crown["kind"]) => {
-            const already = crownTextures.get(kind)
-            if (already) return already
-            const made = track(makeCanvasTexture(CROWN_SPRITE_PX, CROWN_SPRITE_PX, (ctx) => drawCrown(ctx, kind)))
-            crownTextures.set(kind, made)
-            return made
-        }
-
-        const CROWN_SIZE = 0.52
-        /** How far above the top of its wearer's head a crown floats. Read off the
-         * character rather than fixed, so it sits right whatever sheet they use. */
-        const CROWN_RISE = 0.22
-        const crownGeometry = track(new THREE.PlaneGeometry(CROWN_SIZE, CROWN_SIZE))
-
-        const clearCrowns = (playerIdx: number) => {
-            const worn = crowns.get(playerIdx)
-            if (!worn) return
-            for (const mesh of worn.meshes) {
-                scene.remove(mesh)
-                ;(mesh.material as THREE.Material).dispose()
-            }
-            crowns.delete(playerIdx)
-            crownWanted.delete(playerIdx)
-        }
-
-        /**
-         * Put the right crowns on a character and stand them above its head.
-         *
-         * Rebuilt only when the set changes, so a walking character costs a
-         * position update and nothing else. Hidden while its wearer is speaking:
-         * the bubble takes that space, and crowns that shoved themselves out of
-         * the way every time somebody talked would read as a fault.
-         */
-        const syncCrowns = (c: CharState) => {
-            const role = (c.role ?? "student") as CrownRole
-            // No pets in this build, so nobody has an egg crown to wear: a
-            // character's crowns are decided by their role alone.
-            const from = role
-            let asked = crownWanted.get(c.playerIdx)
-            if (asked?.from !== from) {
-                const fresh = crownsFor(role, 0)
-                asked = { from, crowns: fresh, kinds: fresh.map((crown) => crown.kind).join(",") }
-                crownWanted.set(c.playerIdx, asked)
-            }
-            const wanted = asked.crowns
-            const kinds = asked.kinds
-            let worn = crowns.get(c.playerIdx)
-            if (worn?.kinds !== kinds) {
-                clearCrowns(c.playerIdx)
-                const meshes = wanted.map((crown) => {
-                    const mesh = new THREE.Mesh(
-                        crownGeometry,
-                        new THREE.MeshBasicMaterial({
-                            map: crownTexture(crown.kind),
-                            alphaTest: 0.5,
-                        }),
-                    )
-                    mesh.name = `crown-${crown.kind}-${c.playerIdx}`
-                    mesh.matrixAutoUpdate = false
-                    scene.add(mesh)
-                    return mesh
-                })
-                worn = { kinds, meshes }
-                if (meshes.length > 0) crowns.set(c.playerIdx, worn)
-            }
-            if (!worn || worn.meshes.length === 0) return
-            const hidden = !c.mesh.visible || speechBubbles.has(c.playerIdx)
-            const y = characterTopY(c.format) + CROWN_RISE
-            worn.meshes.forEach((mesh, index) => {
-                mesh.visible = !hidden
-                if (hidden) return
-                mesh.position.set(c.x + (wanted[index]?.offset ?? 0), y, c.z)
-                mesh.updateMatrix()
-            })
-        }
-
-        registerCleanup(() => {
-            for (const playerIdx of [...crowns.keys()]) clearCrowns(playerIdx)
-        })
 
         // ------------------------------------------------------------ lighting
 
@@ -2186,198 +1270,21 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         }
 
         // ---- house lights ---------------------------------------------------------
-        // Every light the room hangs — the palette's three, the desk pools and the
-        // screen's glow — scaled by one level. 1 is the room as the clock outside
-        // paints it; the presentation spotlight takes it down towards
-        // 1 - ROOM_DIM_DEPTH and the spot becomes the only thing lighting a desk.
-        let roomDim = 0
-        let roomDimTarget = 0
+        // The palette's three lights and the desk pools, retuned whenever the
+        // clock outside moves.
         const applyLightLevel = () => {
-            const level = 1 - roomDim * ROOM_DIM_DEPTH
             if (palette) {
-                hemi.intensity = palette.hemiIntensity * level
-                key.intensity = palette.keyIntensity * level
-                rim.intensity = palette.rimIntensity * level
+                hemi.intensity = palette.hemiIntensity
+                key.intensity = palette.keyIntensity
+                rim.intensity = palette.rimIntensity
             }
-            for (const light of deskLights) light.intensity = (light.userData.baseIntensity as number) * level
-            for (const light of screenGlowLights) light.intensity = SCREEN_GLOW_INTENSITY * level
+            for (const light of deskLights) light.intensity = light.userData.baseIntensity as number
         }
         buildDeskLights(q.deskLightsPerRow)
         registerCleanup(() => {
             for (const light of deskLights) light.dispose()
         })
 
-        // ---- the presentation spotlight ------------------------------------------
-        const spot = new THREE.SpotLight(
-            0xfff1cf,
-            0,
-            SPOT_HEIGHT * 2.5,
-            Math.atan(SPOT_RADIUS / SPOT_HEIGHT) * 1.15,
-            0.45,
-            SPOT_DECAY,
-        )
-        spot.position.set(0, SPOT_HEIGHT, 0)
-        spot.target.position.set(0, 0, 0)
-        scene.add(spot)
-        scene.add(spot.target)
-        registerCleanup(() => spot.dispose())
-        // The beam: an open cone from the fixture to the floor, additive so it
-        // reads as light in the air rather than a solid. Drawn only while the spot
-        // is up — its opacity follows the light's intensity.
-        const spotBeamMat = track(new THREE.MeshBasicMaterial({
-            color: 0xfff1cf,
-            transparent: true,
-            opacity: 0,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending,
-            side: THREE.DoubleSide,
-            toneMapped: false,
-            fog: false,
-        }))
-        const spotBeam = new THREE.Mesh(
-            track(new THREE.ConeGeometry(SPOT_RADIUS, SPOT_HEIGHT, 40, 1, true)),
-            spotBeamMat,
-        )
-        spotBeam.visible = false
-        scene.add(spotBeam)
-        // The pool on the floor under it: the bright disc that says "this desk".
-        const spotPoolMat = track(new THREE.MeshBasicMaterial({
-            color: 0xfff1cf,
-            transparent: true,
-            opacity: 0,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending,
-            toneMapped: false,
-            fog: false,
-        }))
-        const spotPool = new THREE.Mesh(track(new THREE.CircleGeometry(SPOT_RADIUS, 48)), spotPoolMat)
-        spotPool.rotation.x = -Math.PI / 2
-        spotPool.position.y = 0.045
-        spotPool.visible = false
-        scene.add(spotPool)
-        /** Where the spot is and where it is going, on the floor. */
-        const spotAt = { x: 0, z: 0 }
-        const spotGoal = { x: 0, z: 0 }
-        let spotOn = false
-        const spotlightAudio = new Audio("/spotlight.mp3")
-        spotlightAudio.preload = "auto"
-        const spotlightPlayer = new PresentationAudioPlayer(spotlightAudio)
-        const suspenseAudio = new Audio("/suspense_music.mp3")
-        suspenseAudio.preload = "auto"
-        suspenseAudio.loop = true
-        const suspensePlayer = new PresentationAudioPlayer(suspenseAudio)
-        // The fireworks' cues: one recording per place, each the length of its
-        // volley, played on every screen at the room's effects volume like the
-        // spotlight — the point is a room that hears the finale, not one laptop.
-        const fireworksAudio = ([3, 2, 1] as const).map((place) => {
-            const audio = new Audio(fireworksCueFor(place))
-            audio.preload = "auto"
-            return { place, audio, player: new PresentationAudioPlayer(audio) }
-        })
-        const fireworksPlayer = (place: 1 | 2 | 3) =>
-            fireworksAudio.find((entry) => entry.place === place)!.player
-        // The victory music, one track per place like the cues. Only one plays at
-        // a time: reading the next place cuts the last place's music off.
-        const victoryMusic = ([3, 2, 1] as const).map((place) => {
-            const audio = new Audio(victoryMusicFor(place))
-            audio.preload = "auto"
-            return { place, audio, player: new PresentationAudioPlayer(audio) }
-        })
-        const unlockPresentationAudio = () => {
-            spotlightPlayer.unlock()
-            suspensePlayer.unlock()
-            for (const entry of fireworksAudio) entry.player.unlock()
-            for (const entry of victoryMusic) entry.player.unlock()
-        }
-        window.addEventListener("pointerdown", unlockPresentationAudio, { capture: true })
-        window.addEventListener("keydown", unlockPresentationAudio, { capture: true })
-        registerCleanup(() => {
-            window.removeEventListener("pointerdown", unlockPresentationAudio, { capture: true })
-            window.removeEventListener("keydown", unlockPresentationAudio, { capture: true })
-            spotlightAudio.pause()
-            spotlightAudio.removeAttribute("src")
-            spotlightAudio.load()
-            suspenseAudio.pause()
-            suspenseAudio.removeAttribute("src")
-            suspenseAudio.load()
-            for (const { audio } of [...fireworksAudio, ...victoryMusic]) {
-                audio.pause()
-                audio.removeAttribute("src")
-                audio.load()
-            }
-        })
-        /** 0..1, the light's fade — eased towards spotOn each frame. */
-        let spotLevel = 0
-        const placeSpot = () => {
-            spot.position.set(spotAt.x, SPOT_HEIGHT, spotAt.z)
-            spot.target.position.set(spotAt.x, 0, spotAt.z)
-            spotBeam.position.set(spotAt.x, SPOT_HEIGHT / 2, spotAt.z)
-            spotPool.position.set(spotAt.x, 0.045, spotAt.z)
-        }
-
-        // ---- fireworks -----------------------------------------------------------
-        // The display over the city for the winners' ceremony. The simulation lives
-        // in fireworks.ts; this is one Points buffer it is copied into each frame,
-        // additive and untonemapped so the sparks burn past white and the bloom
-        // pass catches them. Nothing is allocated per burst.
-        const fireworks = createFireworks()
-        const fireworkPositions = new Float32Array(MAX_SPARKS * 3)
-        const fireworkColors = new Float32Array(MAX_SPARKS * 3)
-        const fireworkGeo = track(new THREE.BufferGeometry())
-        fireworkGeo.setAttribute("position", new THREE.BufferAttribute(fireworkPositions, 3).setUsage(THREE.DynamicDrawUsage))
-        fireworkGeo.setAttribute("color", new THREE.BufferAttribute(fireworkColors, 3).setUsage(THREE.DynamicDrawUsage))
-        fireworkGeo.setDrawRange(0, 0)
-        const fireworkMat = track(new THREE.PointsMaterial({
-            size: 1.15,
-            map: track(makeSparkTexture()),
-            vertexColors: true,
-            transparent: true,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending,
-            toneMapped: false,
-            fog: false,
-        }))
-        const fireworkPoints = new THREE.Points(fireworkGeo, fireworkMat)
-        // The bounding sphere would have to be recomputed every frame the display
-        // moves; the display is a handful of draw calls either way.
-        fireworkPoints.frustumCulled = false
-        fireworkPoints.visible = false
-        scene.add(fireworkPoints)
-        /** The volleys already fired this ceremony (`nonce:place`), so a state
-         * frame that repeats a place does not fire it twice. */
-        const firedVolleys = new Set<string>()
-        const fireworkColor = new THREE.Color()
-        const updateFireworks = (dt: number, nowMs: number) => {
-            const idle = fireworks.pending.length === 0 && fireworks.shells.length === 0 && fireworks.sparks.length === 0
-            if (idle) {
-                fireworkPoints.visible = false
-                return
-            }
-            stepFireworks(fireworks, dt, nowMs, Math.random)
-            let n = 0
-            const put = (x: number, y: number, z: number, color: number, brightness: number) => {
-                if (n >= MAX_SPARKS) return
-                fireworkPositions[n * 3] = x
-                fireworkPositions[n * 3 + 1] = y
-                fireworkPositions[n * 3 + 2] = z
-                fireworkColor.setHex(color).multiplyScalar(brightness)
-                fireworkColors[n * 3] = fireworkColor.r
-                fireworkColors[n * 3 + 1] = fireworkColor.g
-                fireworkColors[n * 3 + 2] = fireworkColor.b
-                n++
-            }
-            // A rising shell is a bright white-gold point; a spark fades with its
-            // life, and the few embers each burst throws burn brighter for longer.
-            for (const shell of fireworks.shells) put(shell.x, shell.y, shell.z, 0xfff3d0, 2.4)
-            for (const spark of fireworks.sparks) {
-                const fade = spark.life / spark.maxLife
-                put(spark.x, spark.y, spark.z, spark.color, fade * fade * (spark.size > 0.5 ? 3.2 : 2.2))
-            }
-            ; (fireworkGeo.attributes["position"] as THREE.BufferAttribute).needsUpdate = true
-                ; (fireworkGeo.attributes["color"] as THREE.BufferAttribute).needsUpdate = true
-            fireworkGeo.setDrawRange(0, n)
-            fireworkPoints.visible = n > 0
-        }
 
         // ------------------------------------------------------------ tables
 
@@ -2426,7 +1333,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         /**
          * The room furniture that stands between the camera and the wall screen —
          * the team tables. Framing the screen stands them down
-         * so they stop covering the band the standings are written in; backing out
+         * so they stop covering the band the text is written in; backing out
          * puts them back. Collected as they are built rather than searched for by
          * name, so a new piece of furniture in front of the screen only has to be
          * pushed here.
@@ -2435,9 +1342,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const tableHitboxes: THREE.Mesh[] = []
         const hitboxGeo = track(new THREE.BoxGeometry(6.4, 2.6, 4))
         const hitboxMat = track(new THREE.MeshBasicMaterial({ visible: false }))
-        const initialTeamCounts = PARTICIPANT_TABLES.map((_, teamIdx) =>
-            opts.players.filter((player) => player.teamIdx === teamIdx).length,
-        )
         const labelSprites: Array<{
             sprite: THREE.Sprite
             baseLabel: string
@@ -2449,148 +1353,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         /** Is there a team behind the desk at this index, or is it just furniture? */
         const hasTeamAt = (ti: number) => tableHasTeam(ti, opts.teamLabels.length)
 
-        // ---- floating rank numerals -------------------------------------------
-        // One extruded block per lit pixel of a 3×5 digit (rank-numerals.ts), merged
-        // into a single ExtrudeGeometry so a numeral is one draw call. Geometry is
-        // cached by placing and material by colour: ten desks share at most ten
-        // numerals and four colours between them, and both survive the standings
-        // moving — a rank change swaps which cached pair a desk points at rather
-        // than building anything.
-        const rankGeoCache = new Map<number, THREE.ExtrudeGeometry>()
-        const rankMatCache = new Map<number, THREE.MeshStandardMaterial>()
-        const rankGeometry = (rank: number): THREE.ExtrudeGeometry => {
-            let geo = rankGeoCache.get(rank)
-            if (!geo) {
-                const { cells } = rankNumeralCells(rank)
-                const shapes = cells.map((cell) => {
-                    // Each cell carries its own edge length: the ordinal suffix is set as
-                    // a smaller superscript, so the grid is not uniform.
-                    const half = (cell.size * RANK_CELL) / 2
-                    const shape = new THREE.Shape()
-                    shape.moveTo(cell.x * RANK_CELL - half, cell.y * RANK_CELL - half)
-                    shape.lineTo(cell.x * RANK_CELL + half, cell.y * RANK_CELL - half)
-                    shape.lineTo(cell.x * RANK_CELL + half, cell.y * RANK_CELL + half)
-                    shape.lineTo(cell.x * RANK_CELL - half, cell.y * RANK_CELL + half)
-                    shape.closePath()
-                    return shape
-                })
-                geo = new THREE.ExtrudeGeometry(shapes, { depth: RANK_DEPTH, bevelEnabled: false })
-                // rankNumeralCells centres the numeral on the origin in X and Y; the
-                // extrusion only grows forward, so this centres it in Z as well and the
-                // sway turns about the numeral's middle instead of its back face.
-                geo.translate(0, 0, -RANK_DEPTH / 2)
-                rankGeoCache.set(rank, track(geo))
-            }
-            return geo
-        }
-        const numeralMaterial = (color: number): THREE.MeshStandardMaterial => {
-            let mat = rankMatCache.get(color)
-            if (!mat) {
-                // Lit like the furniture, but glowing enough to hold its colour in the
-                // room's warm gloom. Kept matte and barely
-                // metallic on purpose: a specular highlight this close to a desk pool
-                // is what turns a digit into a blob.
-                mat = track(new THREE.MeshStandardMaterial({
-                    color,
-                    emissive: color,
-                    emissiveIntensity: 0.5,
-                    roughness: 0.6,
-                    metalness: 0.1,
-                }))
-                rankMatCache.set(color, mat)
-            }
-            return mat
-        }
-
-        /** One desk's numeral, or null while that desk has no placing. */
-        const rankNumerals = new Map<number, THREE.Mesh>()
-        /** The desk group each numeral hangs in, so a placing can arrive later. */
-        const tableGroups = new Map<number, THREE.Group>()
-
-        /**
-         * Hang a numeral over a desk — a placing in its medal colour, or during
-         * presentations the desk's slot in the running order in the presentation
-         * colour — or take it down with null.
-         *
-         * A number outside 1..99 is not one this room can draw (rankNumeralCells
-         * throws on it), so it is treated the same as having none. `pop` scales the
-         * numeral in from nothing: the spotlight has just landed on this desk.
-         */
-        const applyDeskNumeral = (ti: number, number: number | null, color: number, pop = false) => {
-            const existing = rankNumerals.get(ti)
-            if (number === null || !Number.isInteger(number) || number < 1 || number > 99) {
-                if (existing) {
-                    existing.parent?.remove(existing)
-                    rankNumerals.delete(ti)
-                }
-                return
-            }
-            const group = tableGroups.get(ti)
-            if (!group || !hasTeamAt(ti)) return
-            const geometry = rankGeometry(number)
-            const material = numeralMaterial(color)
-            const unchanged = existing?.geometry === geometry && existing.material === material
-            const mesh = existing ?? new THREE.Mesh(geometry, material)
-            mesh.geometry = geometry
-            mesh.material = material
-            // Every placing is the same shape, so every desk's numeral hangs at the
-            // one height — and the bob works from here rather than from wherever the
-            // last frame left it.
-            mesh.position.set(0, RANK_NUMERAL_Y, RANK_NUMERAL_Z)
-            mesh.userData.baseY = RANK_NUMERAL_Y
-            mesh.castShadow = false
-            if (pop && !unchanged) {
-                mesh.userData.popAt = performance.now()
-                mesh.scale.setScalar(0.001)
-            }
-            if (!existing) {
-                group.add(mesh)
-                rankNumerals.set(ti, mesh)
-            }
-        }
-
-        /** The standings, as the leaderboard poll last handed them over. */
-        let teamRanks: readonly (number | null)[] = opts.teamRanks ?? []
-        /** The presentation running order, by desk, while there is one. */
-        let presentation: RoomPresentation | null = null
-        /** The winners' ceremony, by desk, while one is running. */
-        let winners: RoomWinners | null = null
-        /** How many slots the room had revealed at the last refresh, so the tick
-         * can tell when the sweep has reached another desk. -1 forces a refresh. */
-        let presentationRevealed = -1
-
-        /**
-         * Every desk's numeral, from the standings and — over them — the running
-         * order: a desk whose slot the sweep has reached wears that slot in the
-         * presentation colour instead of its placing. Every desk is visited, not
-         * just the ones with a number: a team that drops off the leaderboard has to
-         * lose its numeral too.
-         */
-        const refreshDeskNumerals = (pop = false) => {
-            const slots = presentation ? presentationSlotsByTeamIdx(presentation, opts.teamLabels.length) : null
-            const revealed = presentation ? revealProgress(presentation, Date.now()).revealed : 0
-            const podium = winners ? podiumByTeamIdx(winners, opts.teamLabels.length) : null
-            PARTICIPANT_TABLES.forEach((_, ti) => {
-                // Through the ceremony the desks wear the podium and nothing else: a
-                // live placing over the desk would read out first place before the
-                // gamemaster does.
-                if (podium) {
-                    const place = podium[ti] ?? null
-                    applyDeskNumeral(ti, place, place === null ? 0 : rankNumeralColor(place), pop)
-                    return
-                }
-                const slot = slots?.[ti] ?? null
-                if (slot !== null && slot <= revealed) {
-                    // Green once they have presented, hot pink while they are still to
-                    // come: the desks alone say how far down the order the room has got.
-                    const done = presentation !== null && isDeskDone(presentation, ti)
-                    applyDeskNumeral(ti, slot, done ? PRESENTATION_DONE_COLOR : PRESENTATION_COLOR, pop)
-                    return
-                }
-                const rank = teamRanks[ti] ?? null
-                applyDeskNumeral(ti, rank, rank === null ? 0 : rankNumeralColor(rank))
-            })
-        }
 
         // Faded twins of the furniture materials, one per original, so the unused
         // desks read as switched off without every desk paying for its own copy.
@@ -2712,10 +1474,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             }
 
             const baseLabel = opts.teamLabels[ti] ?? EMPTY_TABLE_LABEL
-            const label = tableLabelText(ti, opts.teamLabels, {
-                count: initialTeamCounts[ti] ?? 0,
-                showCount: interactionMode === "assign",
-            })
+            const label = tableLabelText(ti, opts.teamLabels, { count: 0, showCount: false })
             const normal = makeLabelTexture(label, false, !hasTeam)
             const gold = makeLabelTexture(label, true)
             const labelMat = track(new THREE.SpriteMaterial({ map: normal, depthTest: true }))
@@ -2724,14 +1483,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             sprite.position.set(0, AREA_LABEL_Y, 0)
             group.add(sprite)
             if (!hasTeam) fadeTable(group)
-            // Registered before the numeral goes in: applyDeskNumeral hangs it in the
-            // desk's own group, so it pans, fades and disposes with the desk.
-            tableGroups.set(ti, group)
             screenOccluders.push(group)
-            {
-                const rank = opts.teamRanks?.[ti] ?? null
-                applyDeskNumeral(ti, rank, rank === null ? 0 : rankNumeralColor(rank))
-            }
             const labelState = { sprite, baseLabel, normal, gold, hasTeam }
             labelSprites.push(labelState)
             registerCleanup(() => {
@@ -2771,23 +1523,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         interactHighlight.visible = false
         scene.add(interactHighlight)
 
-        const destinationHighlights = PARTICIPANT_TABLES.map((tbl) => {
-            const mesh = new THREE.Mesh(
-                track(new THREE.PlaneGeometry(6.6, 4.25)),
-                track(new THREE.MeshBasicMaterial({
-                    color: 0x5070e0,
-                    transparent: true,
-                    opacity: 0.18,
-                    depthWrite: false,
-                    toneMapped: false,
-                })),
-            )
-            mesh.rotation.x = -Math.PI / 2
-            mesh.position.set(toX(tbl.x + tbl.w / 2), 0.015, toZ(tbl.y + tbl.h / 2))
-            mesh.visible = false
-            scene.add(mesh)
-            return mesh
-        })
 
         // ------------------------------------------------------------ characters
 
@@ -2829,9 +1564,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             }),
         )
 
-        let fallbackLobbyOrdinal = 0
         const chars: CharState[] = opts.players.map((p) => {
-            const localLobbyOrdinal = p.teamIdx === null ? fallbackLobbyOrdinal++ : null
             const resolved = resolveSprite(p.spriteId, p.spriteSheet, p.playerIdx, p.teamIdx ?? 0)
             const custom = resolved.kind === "custom" ? customTex.get(resolved.sheetDataUrl) : undefined
 
@@ -2871,13 +1604,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 pauseLeft: wander.pauseLeft,
                 rng: wander.rng,
                 teamIdx: p.teamIdx,
-                lobbyOrdinal:
-                    p.teamIdx === null
-                        ? p.lobbyOrdinal ?? localLobbyOrdinal
-                        : null,
                 playerIdx: p.playerIdx,
-                draggable: p.draggable,
-                busy: false,
                 name: p.name,
                 role: p.role ?? "student",
                 presenceHalo,
@@ -2989,7 +1716,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             // A character who is standing rather than walking a lap faces the camera:
             // these all used to pin dir 0, which is the row drawn from BEHIND.
             if (c.teamIdx === null) {
-                if (assignmentLayout) return lobbyPosition(c.lobbyOrdinal ?? 0, assignmentLayout)
                 return { x: c.x, z: c.z, dir: FACING_CAMERA }
             }
             const tbl = PARTICIPANT_TABLES[c.teamIdx]
@@ -3411,10 +2137,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     pauseLeft: wander.pauseLeft,
                     rng: wander.rng,
                     teamIdx: null,
-                    lobbyOrdinal: null,
                     playerIdx: guest.playerIdx,
-                    draggable: false,
-                    busy: false,
                     name: guest.name,
                     role: guest.role ?? "viewer",
                     presenceHalo,
@@ -3461,22 +2184,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             for (const playerIdx of [...guestPlayerIdxs]) removeGuestChar(playerIdx)
         })
 
-        const refreshTeamLabels = () => {
-            if (interactionMode !== "assign") return
-            const counts = PARTICIPANT_TABLES.map((_, teamIdx) =>
-                chars.filter((c) => c.teamIdx === teamIdx).length,
-            )
-            labelSprites.forEach((label, teamIdx) => {
-                // An unused desk keeps saying NO TEAM — a count of (0) would read as a
-                // team that simply has nobody in it yet.
-                if (!label.hasTeam) return
-                const text = `${label.baseLabel} (${counts[teamIdx] ?? 0})`
-                label.normal.dispose()
-                label.gold.dispose()
-                label.normal = makeLabelTexture(text, false)
-                label.gold = makeLabelTexture(text, true)
-            })
-        }
 
         // selected-player marker (bobbing gold diamond) + name tags
         const marker = new THREE.Mesh(
@@ -3530,10 +2237,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         if (q.grade) {
             composer = track(new EffectComposer(renderer))
             composer.addPass(track(new RenderPass(scene, camera)))
-            // The broadcast picture, before the output pass (which tone maps it —
-            // hence the inverse in its material).
-            composer.addPass(new BroadcastPicturePass(pictureScene, camera))
-            pictureUniforms.uUndoToneMapping.value = 1
             composer.addPass(track(new OutputPass()))
             grade = track(new ShaderPass(RoomGradeShader))
             grade.enabled = q.grade
@@ -3562,33 +2265,16 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         /** Measured fresh every time rather than cached: it depends on the aspect
          * AND the zoom, both of which a resize, a pinch or a +/− press can move
          * under it, and it is a handful of tangents. */
-        const framedPose = (): CameraPose => {
-            // A broadcast is framed on the PICTURE, not on the wall carrying it. The
-            // wall is 4.1:1 and a viewport is nearer 16:9, so fitting the whole screen
-            // runs out of width long before height and spends most of the view on
-            // floor and ceiling — with the picture itself left small in the middle of
-            // it. Framing its rect puts the camera as close as the clip allows.
-            const picture = newsVideo
-                ? broadcastWorldRect(
-                    broadcastFitRect(newsVideo.videoWidth, newsVideo.videoHeight, SCREEN_TEX_W, SCREEN_TEX_H),
-                    SCREEN_TEX_W,
-                    SCREEN_TEX_H,
-                    SCREEN_W,
-                    SCREEN_H,
-                    SCREEN_CY,
-                )
-                : null
-            return screenFocusPose({
-                width: picture?.width ?? SCREEN_W,
-                height: picture?.height ?? SCREEN_H,
-                centreY: picture?.centreY ?? SCREEN_CY,
-                padding: picture ? BROADCAST_FOCUS_PADDING : undefined,
+        const framedPose = (): CameraPose =>
+            screenFocusPose({
+                width: SCREEN_W,
+                height: SCREEN_H,
+                centreY: SCREEN_CY,
                 z: screen.position.z,
                 fovDeg: camera.fov,
                 aspect: camera.aspect,
                 zoom: camera.zoom,
             })
-        }
 
         /** A close view of the cabinet for its entrance: over Primey's shoulder
          * from the south, aimed a little above the cabinet so the frame holds the
@@ -3631,10 +2317,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
         /** Carry out what a framed-screen key (or its touch-pad equivalent) means. */
         const applyFramedAction = (action: ScreenFocusKeyAction) => {
-            if (action === "page-prev" || action === "page-next") {
-                turnScreenPage(action === "page-prev" ? "prev" : "next")
-                return
-            }
             if (action === "swallow") return
             setScreenFocus(false)
         }
@@ -3653,16 +2335,9 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const setScreenFocus = (next: boolean) => {
             if (screenFocused === next) return
             // Somebody stepping out of the framed view has taken the camera back: the
-            // broadcast no longer holds it, so the clip ending will not move them.
-            if (!next) {
-                newsFocusHeld = false
-                winnersFocusHeld = false
-            }
+            // bulletin no longer holds it, so its coming down will not move them.
+            if (!next) bulletinFocusHeld = false
             screenFocused = next
-            // The screen holds still while somebody has it framed, and gets a fresh
-            // dwell when they let it go — so the page they walked away from is not
-            // already half-expired.
-            screenPageAt = performance.now()
             // The follow-cam and the framed pose would otherwise fight over the camera
             // every frame; suspending it is the same "somebody else is driving" flag a
             // floor drag sets, and letting it go hands the view back to the character.
@@ -3703,18 +2378,10 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
         let pointerDirty = false
         let hoverPlayerIdx: number | null = null
-        let activeDrag: {
-            pointerId: number
-            char: CharState
-            fromTeamIdx: number | null
-            hoverTeamIdx: number | null
-            overLobby: boolean
-        } | null = null
 
         const setHoveredPlayer = (playerIdx: number | null) => {
             if (playerIdx === hoverPlayerIdx) return
             hoverPlayerIdx = playerIdx
-            opts.onPlayerHover?.(playerIdx)
             if (playerIdx !== null && playerIdx !== selPlayerIdx) {
                 const c = charByPlayerIdx.get(playerIdx)
                 if (c) {
@@ -3772,84 +2439,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return charByPlayerIdx.get(hits[0]!.object.userData.playerIdx as number) ?? null
         }
 
-        const dropTargetAt = () => {
-            raycaster.setFromCamera(pointerNdc, camera)
-            // Tables win if projection/perspective ever causes hit volumes to overlap.
-            const tableHits = raycaster.intersectObjects(tableHitboxes, false)
-            if (tableHits.length > 0) {
-                return {
-                    hoverTeamIdx: tableHits[0]!.object.userData.tableIdx as number,
-                    overLobby: false,
-                }
-            }
-            return {
-                hoverTeamIdx: null,
-                overLobby: lobbyHitbox !== null && raycaster.intersectObject(lobbyHitbox, false).length > 0,
-            }
-        }
-
-        const clearDropHighlight = () => {
-            highlight.visible = false
-            if (lobbyHighlight) lobbyHighlight.visible = false
-            destinationHighlights.forEach((destination) => {
-                destination.visible = false
-            })
-            labelSprites.forEach((label) => {
-                label.sprite.material.map = label.normal
-                label.sprite.material.needsUpdate = true
-            })
-        }
-
-        const applyDropHighlight = (drag: NonNullable<typeof activeDrag>) => {
-            clearDropHighlight()
-            const highlightState = roomDragHighlightState(
-                drag.fromTeamIdx,
-                PARTICIPANT_TABLES.length,
-                drag.hoverTeamIdx,
-            )
-            for (const teamIdx of highlightState.eligibleTeamIdxs) {
-                const destination = destinationHighlights[teamIdx]
-                if (destination) destination.visible = true
-            }
-            if (highlightState.strongTeamIdx !== null) {
-                const tbl = PARTICIPANT_TABLES[highlightState.strongTeamIdx]
-                if (!tbl) return
-                highlight.position.set(toX(tbl.x + tbl.w / 2), 0.02, toZ(tbl.y + tbl.h / 2))
-                highlight.visible = true
-                const label = labelSprites[highlightState.strongTeamIdx]
-                if (label) {
-                    label.sprite.material.map = label.gold
-                    label.sprite.material.needsUpdate = true
-                }
-                return
-            }
-            const drop = resolveRoomDrop({
-                playerIdx: drag.char.playerIdx,
-                fromTeamIdx: drag.fromTeamIdx,
-                hoverTeamIdx: drag.hoverTeamIdx,
-                overLobby: drag.overLobby,
-            })
-            if (!drop) return
-            if (drop.destinationTeamIdx === null) {
-                if (lobbyHighlight) lobbyHighlight.visible = true
-            }
-        }
-
-        const updateActiveDrag = (e: PointerEvent) => {
-            const drag = activeDrag
-            if (!drag || drag.pointerId !== e.pointerId) return
-            updatePointer(e)
-            raycaster.setFromCamera(pointerNdc, camera)
-            if (raycaster.ray.intersectPlane(dragFloor, dragPoint)) {
-                drag.char.x = dragPoint.x
-                drag.char.z = dragPoint.z
-                drag.char.mesh.position.set(drag.char.x, characterGroundY(drag.char.format) + DRAG_LIFT, drag.char.z)
-            }
-            const target = dropTargetAt()
-            drag.hoverTeamIdx = target.hoverTeamIdx
-            drag.overLobby = target.overLobby
-            applyDropHighlight(drag)
-        }
 
         const onClick = (e: MouseEvent) => {
             // The click that ends a floor drag would otherwise land as a selection.
@@ -3974,51 +2563,23 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             // A gesture's click (if any) always lands before the next press, so a
             // suppression that was never consumed — a pinch usually ends with no
             // click at all — must not survive to eat this new tap.
-            if (!activeDrag && !activePanDrag && !activePinch && touchPoints.size === 0) {
+            if (!activePanDrag && !activePinch && touchPoints.size === 0) {
                 suppressNextClick = false
             }
             if (e.pointerType === "touch") {
                 touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY })
-                // A second finger while a student is mid-drag stays ignored; any other
-                // second finger starts the pinch. Third and later fingers do nothing.
-                if (touchPoints.size === 2 && !activeDrag) {
+                // A second finger starts the pinch. Third and later fingers do nothing.
+                if (touchPoints.size === 2) {
                     beginPinch()
                     return
                 }
                 if (touchPoints.size > 2) return
             }
-            if (activeDrag || activePanDrag || activePinch || (e.pointerType === "mouse" && e.button !== 0)) return
+            if (activePanDrag || activePinch || (e.pointerType === "mouse" && e.button !== 0)) return
             updatePointer(e)
-            // Dragging a student onto a team wins over dragging the room: the pan is
-            // what an empty patch of floor does.
-            if (interactionMode === "assign") {
-                const c = pickCharacterAt()
-                if (c && c.draggable && !c.busy) {
-                    startAssignmentDrag(e, c)
-                    return
-                }
-            }
             beginPanDrag(e)
         }
 
-        const startAssignmentDrag = (e: PointerEvent, c: CharState) => {
-            activeDrag = {
-                pointerId: e.pointerId,
-                char: c,
-                fromTeamIdx: c.teamIdx,
-                hoverTeamIdx: null,
-                overLobby: false,
-            }
-            // Pointer capture suppresses ordinary hover updates while dragging. Keep
-            // the dragged participant active so admin arrivals stay highlighted in
-            // the sidebar until the drop or cancellation completes.
-            setHoveredPlayer(roomDragPlayerHover(c.playerIdx, true))
-            c.transition = null
-            applyDropHighlight(activeDrag)
-            renderer.domElement.setPointerCapture(e.pointerId)
-            renderer.domElement.style.cursor = "grabbing"
-            e.preventDefault()
-        }
         const onMove = (e: PointerEvent) => {
             if (e.pointerType === "touch" && touchPoints.has(e.pointerId)) {
                 touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY })
@@ -4027,11 +2588,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     e.preventDefault()
                     return
                 }
-            }
-            if (activeDrag?.pointerId === e.pointerId) {
-                updateActiveDrag(e)
-                e.preventDefault()
-                return
             }
             if (activePanDrag?.pointerId === e.pointerId) {
                 updatePanDrag(e)
@@ -4042,66 +2598,35 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             }
             updatePointer(e)
         }
-        const finishDrag = (e: PointerEvent, emitDrop: boolean) => {
-            const drag = activeDrag
-            if (!drag || drag.pointerId !== e.pointerId) return
-            if (emitDrop) updateActiveDrag(e)
-            const drop = emitDrop
-                ? resolveRoomDrop({
-                    playerIdx: drag.char.playerIdx,
-                    fromTeamIdx: drag.fromTeamIdx,
-                    hoverTeamIdx: drag.hoverTeamIdx,
-                    overLobby: drag.overLobby,
-                })
-                : null
-            activeDrag = null
-            drag.char.transition = null
-            snapToAuthoritativeHome(drag.char)
-            clearDropHighlight()
-            applySelection()
-            setHoveredPlayer(roomDragPlayerHover(drag.char.playerIdx, false))
-            renderer.domElement.style.cursor = "default"
-            if (renderer.domElement.hasPointerCapture(e.pointerId)) {
-                renderer.domElement.releasePointerCapture(e.pointerId)
-            }
-            if (drop) opts.onDrop?.(drop)
-        }
         const onPointerUp = (e: PointerEvent) => {
             endTouchPoint(e)
             finishPanDrag(e)
-            finishDrag(e, true)
         }
         const onPointerCancel = (e: PointerEvent) => {
             endTouchPoint(e)
             finishPanDrag(e)
-            finishDrag(e, false)
         }
         const onLostPointerCapture = (e: PointerEvent) => {
             finishPanDrag(e)
-            finishDrag(e, false)
         }
         const onPointerLeave = () => {
-            if (activeDrag || activePanDrag) return
+            if (activePanDrag) return
             pointerDirty = false
             setHoveredPlayer(null)
             renderer.domElement.style.cursor = "default"
         }
 
-        // Both modes now take the same pointer stream: assign mode spends a press on
-        // a student on moving them, and every other press — in either mode — drags
-        // the room.
+        // Every press on the floor drags the room; a click picks.
         renderer.domElement.addEventListener("pointerdown", onPointerDown)
         renderer.domElement.addEventListener("pointermove", onMove)
         renderer.domElement.addEventListener("pointerup", onPointerUp)
         renderer.domElement.addEventListener("pointercancel", onPointerCancel)
         renderer.domElement.addEventListener("lostpointercapture", onLostPointerCapture)
         renderer.domElement.addEventListener("pointerleave", onPointerLeave)
-        // Both modes handle raw touches now (drag-pan and pinch-zoom), so the
-        // browser gets none of them.
+        // Raw touches are handled here (drag-pan and pinch-zoom), so the browser
+        // gets none of them.
         renderer.domElement.style.touchAction = "none"
-        if (interactionMode !== "assign") {
-            renderer.domElement.addEventListener("click", onClick)
-        }
+        renderer.domElement.addEventListener("click", onClick)
         registerCleanup(() => {
             renderer.domElement.removeEventListener("click", onClick)
             renderer.domElement.removeEventListener("pointerdown", onPointerDown)
@@ -4110,12 +2635,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             renderer.domElement.removeEventListener("pointercancel", onPointerCancel)
             renderer.domElement.removeEventListener("lostpointercapture", onLostPointerCapture)
             renderer.domElement.removeEventListener("pointerleave", onPointerLeave)
-        })
-        registerCleanup(() => {
-            if (activeDrag && renderer.domElement.hasPointerCapture(activeDrag.pointerId)) {
-                renderer.domElement.releasePointerCapture(activeDrag.pointerId)
-            }
-            activeDrag = null
         })
 
         // ------------------------------------------------------------ selection
@@ -4151,7 +2670,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         let simCarryMs = 0
         let raf = 0
         registerCleanup(() => cancelAnimationFrame(raf))
-        let lastScreenRedraw = 0
         let lastTimeOfDayCheck = 0
         const clockStart = performance.now()
         let lastFrameAt = clockStart
@@ -4171,28 +2689,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             simFrame += advance.steps
             const t = (now - clockStart) / 1000
 
-            // wall screen refresh (2×/s) — the countdown's seconds, and whatever the
-            // leaderboard poll last handed us
-            if (t - lastScreenRedraw > 0.5) {
-                lastScreenRedraw = t
-                // A window entering its last minute takes the wheel back off the board —
-                // and so does an event that has not opened one at all, which has no
-                // standings to put on the board in the first place.
-                if (
-                    !forcedScreenPage &&
-                    !presentation &&
-                    !winners &&
-                    screenPage !== "countdown" &&
-                    (!eventStarted(sessionClock) || screenLines(sessionClock, Date.now(), countdown).solo)
-                ) {
-                    screenPage = "countdown"
-                    screenPageAt = now
-                }
-                // A screen somebody is standing and reading does not turn its own pages
-                // out from under them; the cycle is for the rest of the room.
-                if (!screenFocused && !presentation && !winners && now - screenPageAt >= pageDwellMs(screenPage)) turnScreenPage()
-                else redrawScreen()
-            }
 
             // A playing broadcast is not the canvas's business: its picture is a
             // VideoTexture on its own quad, and the browser refreshes that on the
@@ -4214,15 +2710,14 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
 
             // characters
             const walkFrame = Math.floor((simFrame * WALK_SPEED) / WALK_FRAME_STEPS)
-            if (localChar && !activeDrag) {
+            if (localChar) {
                 for (let step = 0; step < advance.steps; step++) stepLocalControl()
             }
             for (const c of chars) {
-                const isDragging = activeDrag?.char === c
                 const isLocal = c === localChar
                 let dir: WalkDir
                 let standing: boolean
-                if (isLocal && !isDragging) {
+                if (isLocal) {
                     // The player's own character: keyboard-driven, collision-checked,
                     // zero-latency — the hub only relays it to everyone else.
                     c.transition = null
@@ -4231,7 +2726,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     c.mesh.position.set(c.x, characterGroundY(c.format), c.z)
                     dir = localDir
                     standing = !localMoving
-                } else if (c.net && !isDragging) {
+                } else if (c.net) {
                     // Remote-synced (a live player elsewhere, or the hub's wander sim):
                     // glide toward the 10 Hz target rather than stepping to it.
                     c.transition = null
@@ -4249,37 +2744,33 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     dir = c.net.dir
                     standing = !c.net.moving
                 } else {
-                    if (!isDragging && c.teamIdx !== null) {
+                    if (c.teamIdx !== null) {
                         for (let step = 0; step < advance.steps; step++) stepWander(c)
                     }
                     const home = authoritativePosition(c)
-                    if (!isDragging) {
-                        let y = characterGroundY(c.format)
-                        if (c.transition) {
-                            const progress = Math.min(1, (performance.now() - c.transition.startedAt) / c.transition.duration)
-                            const eased = 1 - (1 - progress) * (1 - progress)
-                            c.x = THREE.MathUtils.lerp(c.transition.fromX, home.x, eased)
-                            c.z = THREE.MathUtils.lerp(c.transition.fromZ, home.z, eased)
-                            y += Math.sin(progress * Math.PI) * TRANSITION_HOP
-                            if (progress === 1) c.transition = null
-                        } else {
-                            c.x = home.x
-                            c.z = home.z
-                        }
-                        c.mesh.position.set(c.x, y, c.z)
+                    let y = characterGroundY(c.format)
+                    if (c.transition) {
+                        const progress = Math.min(1, (performance.now() - c.transition.startedAt) / c.transition.duration)
+                        const eased = 1 - (1 - progress) * (1 - progress)
+                        c.x = THREE.MathUtils.lerp(c.transition.fromX, home.x, eased)
+                        c.z = THREE.MathUtils.lerp(c.transition.fromZ, home.z, eased)
+                        y += Math.sin(progress * Math.PI) * TRANSITION_HOP
+                        if (progress === 1) c.transition = null
+                    } else {
+                        c.x = home.x
+                        c.z = home.z
                     }
+                    c.mesh.position.set(c.x, y, c.z)
                     dir = home.dir
-                    standing = c.teamIdx === null || isDragging || c.pauseLeft > 0
+                    standing = c.teamIdx === null || c.pauseLeft > 0
                 }
                 const row = c.format.dirRow[dir]
                 const animFrame = standing ? c.format.standFrame : c.format.walkFrame(walkFrame)
                 c.texture.offset.set(animFrame / c.format.cols, 1 - (row + 1) / c.format.rows)
-                const dim = interactionMode === "assign"
-                    ? !c.draggable || c.busy
-                    : selTeamIdx !== null && c.teamIdx !== selTeamIdx
+                const dim = selTeamIdx !== null && c.teamIdx !== selTeamIdx
                 c.material.color.setHex(dim ? 0x3c4256 : 0xffffff)
                 // Keep opacity above alphaTest (0.5) so dimmed sprites stay visible.
-                c.material.opacity = dim ? (c.busy ? 0.6 : 0.65) : 1
+                c.material.opacity = dim ? 0.65 : 1
                 // Keep the halo in world space, centred on the character's ground
                 // position. Attaching it to the billboard makes it inherit sprite-facing
                 // transforms and can pull the projected ring away from the feet.
@@ -4288,15 +2779,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             // The snap's fade overrides the opacity and height just set.
             stepSnap(frameMs)
 
-            // Crowns, AFTER the characters have moved: placed before that they
-            // sit at last frame's position while their wearer is at this one,
-            // and the pair jitters against each other all the way across the
-            // room. Every character, not only the ones with pets — the role
-            // markers belong to people who have never hatched a thing.
-            for (const c of chars) syncCrowns(c)
-            for (const playerIdx of [...crowns.keys()]) {
-                if (!charByPlayerIdx.has(playerIdx)) clearCrowns(playerIdx)
-            }
 
             // The cabinet's entrance owns the camera while it runs.
             stepArcadeReveal(frameMs)
@@ -4356,126 +2838,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 }
             }
 
-            // floating rank numerals — bob and sway, offset per desk so ten of them
-            // do not pulse as one
-            if (rankNumerals.size > 0) {
-                for (const [ti, mesh] of rankNumerals) {
-                    const phase = ti * 0.7
-                    mesh.position.y = mesh.userData.baseY as number
-                        + Math.sin(t * RANK_BOB_SPEED + phase) * RANK_BOB
-                    mesh.rotation.y = Math.sin(t * RANK_SWAY_SPEED + phase) * RANK_SWAY
-                    // A numeral the spotlight has just landed on pops in with a little
-                    // overshoot, then settles.
-                    const popAt = mesh.userData.popAt as number | undefined
-                    if (popAt !== undefined) {
-                        const u = Math.min(1, (now - popAt) / NUMERAL_POP_MS)
-                        // ease-out-back: overshoots to ~1.1 around two thirds of the way in.
-                        const v = u - 1
-                        const scale = u >= 1 ? 1 : Math.max(0.001, 1 + 2.70158 * v * v * v + 1.70158 * v * v)
-                        mesh.scale.setScalar(scale)
-                        if (u >= 1) delete mesh.userData.popAt
-                    }
-                }
-            }
 
-            // the presentation: house lights, the spotlight's sweep, and the desks it
-            // has reached. Wall-clock time for the reveal (it replays from the hub's
-            // stamp), frame time for the eases.
-            {
-                const dt = Math.min(0.1, frameMs / 1000)
-                let deskIdx: number | null = null
-                let spotlightPhase = "reveal"
-                let activeRevealNonce: number | null = null
-                if (presentation) {
-                    const progress = revealProgress(presentation, Date.now())
-                    if (!progress.done && presentation.order.length > 0) activeRevealNonce = presentation.nonce
-                    roomDimTarget = progress.dark ? 1 : 0
-                    const n = presentation.order.length
-                    if (progress.sweepSlot !== null) deskIdx = presentation.order[progress.sweepSlot] ?? null
-                    else if (presentation.spotlightTeamIdx !== null) {
-                        deskIdx = presentation.spotlightTeamIdx
-                        spotlightPhase = "manual"
-                    }
-                    // Through the tail the light lingers on the last presenter rather
-                    // than snapping off the instant the sweep ends.
-                    else if (!progress.done && n > 0) deskIdx = presentation.order[n - 1] ?? null
-                    if (progress.revealed !== presentationRevealed) {
-                        presentationRevealed = progress.revealed
-                        refreshDeskNumerals(true)
-                        redrawScreen()
-                    }
-                } else {
-                    // The ceremony takes the house lights part way down: the fireworks
-                    // read against a dim room, and the wall becomes the brightest thing
-                    // in it, which is where everyone should be looking.
-                    roomDimTarget = winners ? WINNERS_HOUSE_DIM : 0
-                }
-                // One music bed for the entire draw, including the lead-in and tail.
-                // It restarts for a re-draw, but not for each desk or a manual spotlight.
-                suspensePlayer.sync(
-                    activeRevealNonce === null ? null : `reveal:${activeRevealNonce}`,
-                    newsAudio,
-                )
-                const tbl = deskIdx !== null && hasTeamAt(deskIdx) ? PARTICIPANT_TABLES[deskIdx] : undefined
-                if (tbl) {
-                    spotGoal.x = toX(tbl.x + tbl.w / 2)
-                    spotGoal.z = toZ(tbl.y + tbl.h / 2)
-                    // The first landing does not slide in from the room's origin.
-                    if (!spotOn && spotLevel === 0) {
-                        spotAt.x = spotGoal.x
-                        spotAt.z = spotGoal.z
-                    }
-                    spotOn = true
-                } else {
-                    spotOn = false
-                }
-
-                // Use the same desk transition as the light, so the reveal's tail and
-                // ordinary frame updates never replay the cue. A fresh draw or a manual
-                // spotlight is a new opening even when it picks the same desk.
-                const soundKey = spotOn && presentation
-                    ? `${presentation.nonce}:${spotlightPhase}:${deskIdx}`
-                    : null
-                spotlightPlayer.sync(soundKey, newsAudio)
-
-                // The spot moves FIRST, and the house lights follow it: they may fall
-                // whenever they like, but they only start coming back up once the spot
-                // is actually out. Running both fades at once lit the room twice over
-                // for the second either side of the handover — see SPOT_OUT_LEVEL.
-                const spotTarget = spotOn ? 1 : 0
-                if (spotLevel !== spotTarget || spotAt.x !== spotGoal.x || spotAt.z !== spotGoal.z) {
-                    const k = 1 - Math.exp(-SPOT_SLIDE_RATE * dt)
-                    spotAt.x += (spotGoal.x - spotAt.x) * k
-                    spotAt.z += (spotGoal.z - spotAt.z) * k
-                    if (Math.abs(spotAt.x - spotGoal.x) < 0.01) spotAt.x = spotGoal.x
-                    if (Math.abs(spotAt.z - spotGoal.z) < 0.01) spotAt.z = spotGoal.z
-                    spotLevel += (spotTarget - spotLevel) * k
-                    if (Math.abs(spotLevel - spotTarget) < 0.005) spotLevel = spotTarget
-                    spot.intensity = SPOT_INTENSITY * spotLevel
-                    spotBeamMat.opacity = 0.06 * spotLevel
-                    spotPoolMat.opacity = 0.22 * spotLevel
-                    spotBeam.visible = spotPool.visible = spotLevel > 0
-                    placeSpot()
-                }
-                const dimGoal = houseDimGoal(roomDim, roomDimTarget, spotLevel)
-                if (roomDim !== dimGoal) {
-                    const k = 1 - Math.exp(-ROOM_DIM_RATE * dt)
-                    roomDim += (dimGoal - roomDim) * k
-                    if (Math.abs(roomDim - dimGoal) < 0.005) roomDim = dimGoal
-                    applyLightLevel()
-                }
-            }
-
-            // the winners' ceremony: the sky falling to night (and coming back), and
-            // the fireworks over the city
-            {
-                const dt = Math.min(0.1, frameMs / 1000)
-                if (nightBlend !== nightGoal) {
-                    nightBlend = advanceNightBlend(nightBlend, nightGoal, dt)
-                    applyTimeOfDay()
-                }
-                updateFireworks(dt, now)
-            }
 
             // selection marker + tag follow their character
             if (selPlayerIdx !== null) {
@@ -4489,20 +2852,15 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             }
 
             // hover raycast (only when the pointer moved)
-            if (pointerDirty && !activeDrag && !activePanDrag?.panning) {
+            if (pointerDirty && !activePanDrag?.panning) {
                 const pick = pickAt()
                 const newHover = pick?.type === "player" ? pick.idx : null
-                if (interactionMode === "assign") {
-                    const hoverChar = newHover === null ? null : charByPlayerIdx.get(newHover) ?? null
-                    renderer.domElement.style.cursor = hoverChar?.draggable && !hoverChar.busy ? "grab" : "default"
-                } else {
-                    renderer.domElement.style.cursor = pick ? "pointer" : "default"
-                }
+                renderer.domElement.style.cursor = pick ? "pointer" : "default"
                 if (newHover !== hoverPlayerIdx) {
                     setHoveredPlayer(newHover)
                 }
                 pointerDirty = false
-            } else if (activeDrag || activePanDrag?.panning) {
+            } else if (activePanDrag?.panning) {
                 hoverTag.visible = false
             }
             if (hoverPlayerIdx !== null && hoverTag.visible) {
@@ -4520,24 +2878,10 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 const m = highlight.material as THREE.MeshBasicMaterial
                 m.opacity = 0.65 + Math.sin(t * 5) * 0.3
             }
-            if (lobbyHighlight?.visible) {
-                const m = lobbyHighlight.material as THREE.MeshBasicMaterial
-                m.opacity = 0.16 + (Math.sin(t * 5) + 1) * 0.08
-            }
 
             if (grade) grade.uniforms.uTime!.value = t
             if (composer) composer.render()
-            else {
-                renderer.render(scene, camera)
-                // No post chain, so nothing to dodge: the picture goes straight on
-                // after the room, against its depth. (The composer path draws it from
-                // its own pass — see BroadcastPicturePass.)
-                if (broadcastPicture.visible) {
-                    renderer.autoClear = false
-                    renderer.render(pictureScene, camera)
-                    renderer.autoClear = true
-                }
-            }
+            else renderer.render(scene, camera)
 
             // The rAF interval, not this callback's own duration: a GPU that cannot
             // keep up shows as a stretched gap between frames, which is exactly what
@@ -4687,119 +3031,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 selPlayerIdx = playerIdx
                 applySelection()
             },
-            setTeamRanks(ranks) {
-                teamRanks = ranks
-                refreshDeskNumerals()
-            },
-            setPresentation(next) {
-                const wasNonce = presentation?.nonce ?? null
-                const wasDone = presentation?.doneTeamIdxs.join() ?? ""
-                presentation = next
-                // A new draw (or the order coming down) starts the reveal over; a
-                // spotlight change keeps the desks as they are. The tick refreshes the
-                // numerals on the reveal's own clock, so a late arrival gets the whole
-                // board at once and a live room gets it desk by desk.
-                if ((next?.nonce ?? null) !== wasNonce) presentationRevealed = -1
-                // A team marked off (or put back) recolours its desk now rather than on
-                // the next reveal step — there may not be another one.
-                if (!next || (next.doneTeamIdxs.join() !== wasDone)) refreshDeskNumerals()
-                // The wall fixes on the order, and comes back to whatever it was on
-                // with a fresh dwell when the order comes down.
-                screenPageAt = performance.now()
-                redrawScreen()
-            },
-            setWinners(next) {
-                const wasNonce = winners?.nonce ?? null
-                const wasPlaces = winners?.podium.length ?? 0
-                winners = next
-                // Night falls when the ceremony starts, by daylight; a room already in
-                // the evening is left on its own clock. Either way the sky comes back
-                // to the clock when the ceremony ends.
-                nightGoal = nightBlendTarget(clockMinute(), next !== null)
-                // A place just read fires its volley — once. The set is keyed on the
-                // ceremony too, so a rerun fires again. A screen that arrives late (a
-                // reconnect, a tab opened mid-ceremony) does not replay a volley the
-                // room has already watched: only a place announced moments ago fires.
-                if (next) {
-                    if (next.nonce !== wasNonce) firedVolleys.clear()
-                    const nowEpoch = Date.now()
-                    for (const entry of next.podium) {
-                        const key = `${next.nonce}:${entry.place}`
-                        if (firedVolleys.has(key)) continue
-                        firedVolleys.add(key)
-                        if (nowEpoch - entry.announcedAt > VOLLEY_REPLAY_WINDOW_MS) continue
-                        launchVolley(fireworks, volleyForPlace(entry.place), performance.now(), Math.random)
-                        fireworksPlayer(entry.place).sync(key, newsAudio)
-                        for (const track of victoryMusic) {
-                            track.player.sync(track.place === entry.place ? key : null, newsAudio)
-                        }
-                    }
-                } else {
-                    // The ceremony ending mid-salvo silences it with the sky.
-                    for (const entry of fireworksAudio) entry.player.sync(null, newsAudio)
-                    for (const entry of victoryMusic) entry.player.sync(null, newsAudio)
-                }
-                // The medals: pop in for a place just read, plain for a late arrival's
-                // whole podium at once. The standings come back when the ceremony ends.
-                refreshDeskNumerals(next !== null && next.nonce === wasNonce && next.podium.length > wasPlaces)
-                // Every screen turns to the wall as the ceremony starts, and again for
-                // each place if somebody has walked their camera away since — and is
-                // handed back at the end, unless a bulletin is still holding it.
-                if (next && !winnersFocusHeld && !screenFocused) {
-                    winnersFocusHeld = true
-                    setScreenFocus(true)
-                } else if (!next && winnersFocusHeld) {
-                    winnersFocusHeld = false
-                    if (!newsFocusHeld) setScreenFocus(false)
-                }
-                screenPageAt = performance.now()
-                redrawScreen()
-            },
-            setMarketNews(news) {
-                const wasClip = marketNews?.clip ?? null
-                marketNews = news
-                const clip = news?.clip ?? null
-                // The clip arrives a beat after the bulletin (it takes a round trip to
-                // learn whether this event was filmed), so this is reached twice for the
-                // same bulletin: start on the edge, and never restart a clip already
-                // running.
-                if (clip && clip.id !== wasClip?.id) startNewsVideo(clip)
-                else if (!clip && (wasClip || newsVideo)) stopNewsVideo()
-                else redrawScreen()
-
-                // A bulletin takes the room's attention whether or not it was filmed.
-                // The video path already does this from its first decoded frame; a
-                // text-only announcement had nothing that did, so the wall lit up behind
-                // whatever the player happened to be looking at. The room's furniture
-                // also hides the bottom of the screen from a normal camera, which is
-                // where a three-line bulletin's last line sits.
-                if (news && !newsFocusHeld && !screenFocused) {
-                    newsFocusHeld = true
-                    setScreenFocus(true)
-                } else if (!news && newsFocusHeld) {
-                    // Released here rather than only in stopNewsVideo, which never runs
-                    // for a bulletin that had no clip to stop. Unless the ceremony still
-                    // wants the wall: a bulletin mid-podium must not hand the camera back.
-                    newsFocusHeld = false
-                    if (!winnersFocusHeld) setScreenFocus(false)
-                }
-            },
-            setForcedScreenPage(page) {
-                forcedScreenPage = page
-                // Releasing leaves the wall on whatever it was showing and gives it a
-                // fresh dwell, so the room reads the last page for its full time rather
-                // than having it snatched away the instant the pin comes off.
-                screenPageAt = performance.now()
-                if (page) screenPage = page
-                redrawScreen()
-            },
-            setNewsAudio(settings) {
-                newsAudio = settings
-                if (newsVideo) {
-                    newsVideo.muted = settings.muted
-                    newsVideo.volume = settings.volume
-                }
-            },
             setMoveInput(direction, active) {
                 // Releases always land (a hold must never stick past losing control);
                 // presses only mean something while a character is being walked.
@@ -4871,27 +3102,9 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     })),
                 })
             },
-            setPlayerLobbyOrdinal(playerIdx, lobbyOrdinal) {
-                const c = charByPlayerIdx.get(playerIdx)
-                if (!c || c.lobbyOrdinal === lobbyOrdinal) return
-                c.lobbyOrdinal = lobbyOrdinal
-                if (c.teamIdx === null && lobbyOrdinal !== null && activeDrag?.char !== c) {
-                    snapToAuthoritativeHome(c)
-                }
-            },
             setPlayerTeam(playerIdx, teamIdx, animate = false) {
                 const c = charByPlayerIdx.get(playerIdx)
                 if (!c || c.teamIdx === teamIdx) return
-                if (activeDrag?.char === c) {
-                    const pointerId = activeDrag.pointerId
-                    activeDrag = null
-                    clearDropHighlight()
-                    snapToAuthoritativeHome(c)
-                    renderer.domElement.style.cursor = "default"
-                    if (renderer.domElement.hasPointerCapture(pointerId)) {
-                        renderer.domElement.releasePointerCapture(pointerId)
-                    }
-                }
                 const fromX = c.x
                 const fromZ = c.z
                 c.teamIdx = teamIdx
@@ -4899,7 +3112,6 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     ? { fromX, fromZ, startedAt: performance.now(), duration: 520 }
                     : null
                 if (!animate) snapToAuthoritativeHome(c)
-                refreshTeamLabels()
                 applySelection()
             },
             setNetStates(states) {
@@ -4959,64 +3171,29 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             showObjectSpeech(objectIdx, text) {
                 showObjectSpeechFor(objectIdx, text)
             },
-            setSessionClock(session) {
-                sessionClock = session
-                // The clock also says whether the event has started at all, and the
-                // board page only exists once it has — a screen left on the board by a
-                // poll that took the window away comes straight back to the countdown.
-                if (!forcedScreenPage && !eventStarted(sessionClock) && screenPage !== "countdown") {
-                    screenPage = "countdown"
-                    screenPageAt = performance.now()
-                }
-                // Only the clock page reads it, and that page repaints on its own tick
-                // anyway; repainting here means a window opening reaches the wall the
-                // moment the poll carrying it does.
-                if (screenPage === "countdown") redrawScreen()
+            setBoard(next) {
+                board = next
+                redrawScreen()
             },
-            setCountdown(target) {
-                countdown = target ?? undefined
-                // Only the clock page shows it; a retarget lands on the wall now rather
-                // than on the next second's tick.
-                if (screenPage === "countdown") redrawScreen()
-            },
-            setLeaderboard(rows) {
-                screenRows = rows
-                // A field that has shrunk can take the lower board off the ring while
-                // the screen is standing on it — a page that is no longer available is
-                // one nobody can turn away from, so leave it now rather than showing
-                // five empty slots until the dwell runs out.
-                if (
-                    !forcedScreenPage &&
-                    !availableScreenPages(eventStarted(sessionClock), screenRows.length).includes(screenPage)
-                ) {
-                    screenPage = SCREEN_PAGES[0]
-                    screenPageAt = performance.now()
+            setBulletin(text) {
+                bulletinText = text
+                redrawScreen()
+                // A bulletin takes the room's attention: the wall lights up behind
+                // whatever the player happened to be looking at, and the room's
+                // furniture hides the bottom of the screen from a normal camera,
+                // which is where a three-line bulletin's last line sits.
+                if (text && !bulletinFocusHeld && !screenFocused) {
+                    bulletinFocusHeld = true
+                    setScreenFocus(true)
+                } else if (!text && bulletinFocusHeld) {
+                    bulletinFocusHeld = false
+                    setScreenFocus(false)
                 }
-                // Only a board page shows them; the countdown redraws on its own tick
-                // anyway, so there is nothing to repaint for it here.
-                if (isBoardPage(screenPage)) redrawScreen()
             },
             freezeLocalInput(ms, faceDir) {
                 inputFrozenUntil = performance.now() + ms
                 localMoving = false
                 if (faceDir !== undefined) localDir = faceDir
-            },
-            setPlayerBusy(playerIdx, busy) {
-                const c = charByPlayerIdx.get(playerIdx)
-                if (!c) return
-                c.busy = busy
-                if (busy && activeDrag?.char === c) {
-                    const pointerId = activeDrag.pointerId
-                    activeDrag = null
-                    c.transition = null
-                    snapToAuthoritativeHome(c)
-                    clearDropHighlight()
-                    applySelection()
-                    renderer.domElement.style.cursor = "default"
-                    if (renderer.domElement.hasPointerCapture(pointerId)) {
-                        renderer.domElement.releasePointerCapture(pointerId)
-                    }
-                }
             },
             dispose() {
                 cleanup()

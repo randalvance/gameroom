@@ -1,13 +1,9 @@
-// The two frames the gamemaster's GAME ROOM console tab pushes into the room:
-// the wall screen it has pinned, and a bulletin it wants on every screen.
-//
-// Both arrive on the room's own hub rather than the exchange's announcement
-// feed — see server/game-room-control-store.ts for why — so this hook is where
-// they enter the client.
+// The frames the gamemaster's console pushes into the room — the music and
+// a bulletin it wants on every screen — arrive on the room's own hub, and
+// this hook is where they enter the client.
 import { act, render } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import type { HelloEvent } from "~/lib/gameRoomNet/protocol"
-import type { WinnersState } from "~/lib/winners-ceremony"
 import { buildAllPlayers } from "~/lib/event-types"
 import type { RoomSceneHandle } from "./scene"
 
@@ -56,9 +52,6 @@ const hello = (over: Partial<HelloEvent> = {}): HelloEvent => ({
   roster: [],
   states: [],
   wanders: [],
-  screen: null,
-  presentation: null,
-  winners: null,
   ...over,
 })
 
@@ -118,37 +111,6 @@ describe("private interaction dialogue", () => {
   })
 })
 
-describe("the wall screen the gamemaster has pinned", () => {
-  it("is nobody's until the gamemaster takes it", () => {
-    render(<Probe />)
-    feed().emit("hello", hello())
-    expect(net.forcedScreenPage).toBeNull()
-  })
-
-  it("follows a screen frame", () => {
-    render(<Probe />)
-    feed().emit("hello", hello())
-    feed().emit("screen", { page: "leaderboard" })
-    expect(net.forcedScreenPage).toBe("leaderboard")
-  })
-
-  it("is released again when the gamemaster hands the wall back", () => {
-    render(<Probe />)
-    feed().emit("hello", hello())
-    feed().emit("screen", { page: "leaderboard" })
-    feed().emit("screen", { page: null })
-    expect(net.forcedScreenPage).toBeNull()
-  })
-
-  // A reconnect replays hello, not the screen frame that came before it, so
-  // hello is the only thing that can tell this client the wall is still taken.
-  it("is picked up from hello by a client that arrives mid-force", () => {
-    render(<Probe />)
-    feed().emit("hello", hello({ screen: "leaderboard-lower" }))
-    expect(net.forcedScreenPage).toBe("leaderboard-lower")
-  })
-})
-
 describe("the PA screens' music", () => {
   it("is the room's playlist until the gamemaster takes it", () => {
     render(<Probe />)
@@ -176,11 +138,11 @@ describe("the PA screens' music", () => {
 })
 
 describe("a bulletin pushed straight at the room", () => {
-  it("arrives with its message and the instrument it concerns", () => {
+  it("arrives with its message and nonce", () => {
     render(<Probe />)
     feed().emit("hello", hello())
-    feed().emit("bulletin", { message: "Lunch at 12:30.", affectedSymbol: "AXON", nonce: 1 })
-    expect(net.bulletin).toEqual({ message: "Lunch at 12:30.", affectedSymbol: "AXON", nonce: 1 })
+    feed().emit("bulletin", { message: "Lunch at 12:30.", nonce: 1 })
+    expect(net.bulletin).toEqual({ message: "Lunch at 12:30.", nonce: 1 })
   })
 
   // Replaying the same market event twice — a rehearsal, then the real thing —
@@ -188,47 +150,14 @@ describe("a bulletin pushed straight at the room", () => {
   it("reads a repeat of the same text as a second bulletin", () => {
     render(<Probe />)
     feed().emit("hello", hello())
-    feed().emit("bulletin", { message: "BREAKING: sanctions.", affectedSymbol: "AXON", nonce: 4 })
+    feed().emit("bulletin", { message: "BREAKING: sanctions.", nonce: 4 })
     const first = net.bulletin
-    feed().emit("bulletin", { message: "BREAKING: sanctions.", affectedSymbol: "AXON", nonce: 5 })
+    feed().emit("bulletin", { message: "BREAKING: sanctions.", nonce: 5 })
     expect(net.bulletin).not.toBe(first)
     expect(net.bulletin?.nonce).toBe(5)
   })
 })
 
-describe("the winners' ceremony", () => {
-  const ceremony: WinnersState = {
-    startedAt: 1_000,
-    nonce: 1,
-    podium: [{ place: 3, teamId: "team-b", announcedAt: 2_000 }],
-  }
-
-  it("is nothing until the gamemaster starts one", () => {
-    render(<Probe />)
-    feed().emit("hello", hello())
-    expect(net.winners).toBeNull()
-  })
-
-  it("follows a winners frame, the whole podium each time", () => {
-    render(<Probe />)
-    feed().emit("hello", hello())
-    feed().emit("winners", ceremony)
-    expect(net.winners).toEqual(ceremony)
-    feed().emit("winners", null)
-    expect(net.winners).toBeNull()
-  })
-
-  // A screen that opens mid-ceremony has missed the frames; hello is what
-  // tells it the room is dark and who is on the podium already.
-  it("is picked up from hello by a client that arrives mid-ceremony", () => {
-    render(<Probe />)
-    feed().emit("hello", hello({ winners: ceremony }))
-    expect(net.winners).toEqual(ceremony)
-  })
-})
-
-// Idle characters are not streamed: the hub hands over the state to wander
-// them from, and this hook is where that reaches the scene.
 describe("idle characters' wander state", () => {
   const ROSTER = buildAllPlayers([
     {
@@ -334,7 +263,7 @@ describe("idle characters' wander state", () => {
 // received a frame cut short, and the unguarded JSON.parse threw out of the
 // listener. A dropped frame also leaves the room out of step with the hub.
 describe("a malformed frame", () => {
-  it.each(["wander", "snapshot", "hello", "chat", "presentation"])(
+  it.each(["wander", "snapshot", "hello", "chat", "music"])(
     "does not throw from a cut-off %s frame, and reconnects to resync",
     (name) => {
       render(<Probe />)
@@ -351,8 +280,8 @@ describe("a malformed frame", () => {
     feed().emit("hello", hello())
     FakeEventSource.instances[0]!.emitRaw("wander", "{")
     FakeEventSource.instances[1]!.emit("hello", hello())
-    FakeEventSource.instances[1]!.emit("screen", { page: "leaderboard" })
-    expect(net.forcedScreenPage).toBe("leaderboard")
+    FakeEventSource.instances[1]!.emit("music", { mode: "stop" })
+    expect(net.music).toEqual({ mode: "stop" })
   })
 
   it("resyncs once per broken stream, however many bad frames it had queued", () => {

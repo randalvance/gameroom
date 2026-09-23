@@ -62,21 +62,3 @@ export function demoTeams(): TeamDTO[] {
 
   return [...competing, ...exhibition]
 }
-
-/** A leaderboard over the demo teams, so the wall screen has a board to show. */
-export function demoLeaderboard(teams: TeamDTO[]) {
-  return teams
-    .filter((team) => team.competing !== false)
-    .map((team, i) => {
-      // Deterministic, not random: the board should look the same on every
-      // reload rather than reshuffling under a projector.
-      const pnl = Math.round(Math.sin(i * 2.4) * 48_000)
-      return {
-        label: team.name,
-        teamId: team.id,
-        totalValue: 1_000_000 + pnl,
-        totalPnL: pnl,
-      }
-    })
-    .sort((a, b) => b.totalValue - a.totalValue)
-}

@@ -9,11 +9,8 @@
 // Clerk-id strings at 10 Hz.
 
 import type { WalkDir } from "../../components/gameRoom/spriteIndex"
-import type { ScreenPage } from "../../components/gameRoom3d/screen-pages"
 import type { PlayerRole } from "../event-types"
-import type { PresentationState } from "../presentation-order"
 import type { RoomMusic } from "../game-room-music"
-import type { WinnersState } from "../winners-ceremony"
 import type { WanderState } from "./wander"
 
 /** How often the hub broadcasts a snapshot of the characters being controlled. */
@@ -84,28 +81,6 @@ export interface HelloEvent {
   states: SnapshotEntry[]
   /** Everyone else, as the simulation state to run them from. */
   wanders: WanderEntry[]
-  /**
-   * The page the gamemaster has pinned the wall screen to, or null while the
-   * players still turn it themselves.
-   *
-   * Carried in hello because a forced page is STATE, not a moment: a tab that
-   * opens — or an EventSource that reconnects — after the broadcast would
-   * otherwise be the one screen in the room showing something else.
-   */
-  screen: ScreenPage | null
-  /**
-   * The presentation running order, if the gamemaster has drawn one, for the
-   * same reason as `screen`: it is STATE. It carries when the reveal began,
-   * so a tab that opens after the draw shows the finished board rather than
-   * running a private reveal of its own.
-   */
-  presentation: PresentationState | null
-  /**
-   * The winners' ceremony, if the gamemaster has started one, for the same
-   * reason again: a screen that opens mid-ceremony must find the room dark
-   * and turned to the wall, with the places already read still up.
-   */
-  winners: WinnersState | null
   /**
    * What the gamemaster has put on the PA screens' music — one looping track,
    * silence, or null for the room's own playlist. Optional during a rollout;
@@ -186,68 +161,25 @@ export interface ChatEvent {
   text: string
 }
 
-/** The gamemaster took, moved, or released the wall screen. */
-export interface ScreenEvent {
-  page: ScreenPage | null
-}
-
 /** The gamemaster put one track on, stopped the music, or gave it back. */
 export type MusicEvent = RoomMusic
 
 /**
- * A bulletin the gamemaster pushed straight at the room.
- *
- * Same shape the room already builds from the exchange's `announcement`, and
- * it lands in the same place — but it travels the ROOM hub, never the
- * exchange's feed, because that feed is the teams' bots' S1 signal. A
- * rehearsal replay of a filmed market event, or an ad-hoc "lunch at 12:30",
- * must not reach a bot and must not move a price.
+ * A bulletin the gamemaster pushed straight at the room. A moment rather
+ * than state: nothing replays it, and the wall is raised by its arrival.
  */
 export interface BulletinEvent {
   message: string
-  /** "" when the message concerns no instrument in particular. */
-  affectedSymbol: string
   /**
-   * Which send this is. Two identical bulletins — a rehearsal, then the real
-   * thing — are indistinguishable by content, so the client needs this to know
-   * the second one is a second one and raise the banner again.
+   * Which send this is. Two identical bulletins are indistinguishable by
+   * content, so the client needs this to know the second one is a second one
+   * and raise the banner again.
    */
   nonce: number
-  /**
-   * How long the spoken read of this message takes, when the deployment has a
-   * voice configured. Absent otherwise.
-   *
-   * Sent to the whole room even though only the admin's screen plays the
-   * audio: every client holds the banner and the camera for the length of the
-   * read, so the wall does not clear mid-sentence.
-   */
-  speechMs?: number
-  /**
-   * How long the gamemaster asked the wall to hold this, in ms.
-   *
-   * A FLOOR, not a cap: a read longer than it still finishes rather than being
-   * cut off mid-sentence. Absent for a bulletin from the exchange's own feed,
-   * which falls back to the room's default.
-   */
+  /** How long the gamemaster asked the wall to hold this, in ms. Absent for
+   * the room's default. */
   holdMs?: number
 }
-
-/**
- * The gamemaster drew (or redrew) the presentation running order, put a team
- * under the spotlight, or ended the presentations (null).
- *
- * The whole state each time rather than a delta: a spotlight frame that
- * arrived without the order it belongs to would be a light on a desk with no
- * number over it.
- */
-export type PresentationEvent = PresentationState | null
-
-/**
- * The gamemaster started the winners' ceremony, read out a place, or ended
- * it (null). The whole state each time, like the running order: a place
- * without the ceremony it belongs to would be a medal with no podium.
- */
-export type WinnersEvent = WinnersState | null
 
 export function packState(s: NetCharState): SnapshotEntry {
   return [
@@ -337,10 +269,7 @@ export type GameRoomEventName =
   | "say"
   | "dialogEnd"
   | "chat"
-  | "screen"
   | "bulletin"
-  | "presentation"
-  | "winners"
   | "music"
 
 /** One SSE frame: named event + JSON data. */

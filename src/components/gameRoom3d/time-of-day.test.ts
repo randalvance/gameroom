@@ -1,18 +1,13 @@
 import { describe, expect, it } from "vitest"
 import {
-  advanceNightBlend,
-  isNightMinute,
+  localMinutes,
   MINUTES_PER_DAY,
-  mixPalette,
-  NIGHT_SHOW_MINUTE,
-  nightBlendTarget,
   parseTimeOverride,
-  sgtMinutes,
   skyPalette,
   type SkyPalette,
 } from "./time-of-day"
 
-const at = (iso: string) => sgtMinutes(new Date(iso))
+const at = (hour: number, minute = 0) => localMinutes(new Date(2026, 7, 16, hour, minute))
 
 /** How far apart two colours are, as the largest single-channel gap. */
 function channelGap(a: number, b: number): number {
@@ -34,24 +29,15 @@ const SCALAR_KEYS = [
   "hemiIntensity", "keyIntensity", "rimIntensity",
 ] as const satisfies ReadonlyArray<keyof SkyPalette>
 
-describe("sgtMinutes", () => {
-  it("reads the Singapore clock, not the host's", () => {
-    // The host running these tests could be in any zone; SGT is UTC+8 and the
-    // room is a Singapore venue, so 02:00 UTC must be 10:00 whoever is looking.
-    expect(at("2026-08-16T02:00:00Z")).toBe(10 * 60)
-    expect(at("2026-08-16T09:30:00Z")).toBe(17 * 60 + 30)
-  })
-
-  it("rolls into the next Singapore day for late-UTC instants", () => {
-    // 17:00 UTC is already 01:00 tomorrow in Singapore. Getting this wrong
-    // shows the room a sunset while the venue is asleep.
-    expect(at("2026-08-16T17:00:00Z")).toBe(60)
-    expect(at("2026-08-16T16:00:00Z")).toBe(0)
+describe("localMinutes", () => {
+  it("reads the viewer's clock", () => {
+    expect(at(10)).toBe(10 * 60)
+    expect(at(17, 30)).toBe(17 * 60 + 30)
   })
 
   it("stays inside a single day", () => {
     for (let h = 0; h < 24; h++) {
-      const m = at(`2026-08-16T${String(h).padStart(2, "0")}:00:00Z`)
+      const m = at(h)
       expect(m).toBeGreaterThanOrEqual(0)
       expect(m).toBeLessThan(MINUTES_PER_DAY)
     }
@@ -187,62 +173,5 @@ describe("parseTimeOverride", () => {
     expect(parseTimeOverride("?tod=25:00")).toBeNull()
     expect(parseTimeOverride("?tod=12:60")).toBeNull()
     expect(parseTimeOverride("?tod=-1:00")).toBeNull()
-  })
-})
-
-describe("the forced night for the winners' ceremony", () => {
-  it("counts dusk to dawn as night and the working day as not", () => {
-    expect(isNightMinute(21 * 60)).toBe(true)
-    expect(isNightMinute(0)).toBe(true)
-    expect(isNightMinute(5 * 60)).toBe(true)
-    expect(isNightMinute(9 * 60)).toBe(false)
-    expect(isNightMinute(17 * 60)).toBe(false)
-    expect(isNightMinute(MINUTES_PER_DAY + 21 * 60)).toBe(true)
-  })
-
-  it("darkens a daytime ceremony and leaves a night-time one alone", () => {
-    expect(nightBlendTarget(15 * 60, true)).toBe(1)
-    expect(nightBlendTarget(21 * 60, true)).toBe(0)
-    expect(nightBlendTarget(15 * 60, false)).toBe(0)
-  })
-
-  it("turns the sky to the lit-city night, not the dead of night", () => {
-    expect(isNightMinute(NIGHT_SHOW_MINUTE)).toBe(true)
-    expect(skyPalette(NIGHT_SHOW_MINUTE).windowLights).toBeGreaterThan(skyPalette(3 * 60).windowLights)
-  })
-
-  it("mixes two palettes channel by channel, and is exact at the ends", () => {
-    const day = skyPalette(13 * 60)
-    const night = skyPalette(NIGHT_SHOW_MINUTE)
-    expect(mixPalette(day, night, 0)).toBe(day)
-    expect(mixPalette(day, night, 1)).toBe(night)
-    const half = mixPalette(day, night, 0.5)
-    for (const k of COLOUR_KEYS) {
-      expect(channelGap(half[k], day[k]), k).toBeLessThanOrEqual(channelGap(night[k], day[k]) / 2 + 1)
-      expect(channelGap(half[k], night[k]), k).toBeLessThanOrEqual(channelGap(night[k], day[k]) / 2 + 1)
-    }
-    for (const k of SCALAR_KEYS) {
-      expect(half[k], k).toBeCloseTo((day[k] + night[k]) / 2, 6)
-    }
-  })
-
-  it("eases towards the target and settles on it", () => {
-    let blend = 0
-    for (let i = 0; i < 60; i++) blend = advanceNightBlend(blend, 1, 1 / 60)
-    expect(blend).toBeGreaterThan(0.5)
-    expect(blend).toBeLessThan(1)
-    for (let i = 0; i < 60 * 10; i++) blend = advanceNightBlend(blend, 1, 1 / 60)
-    expect(blend).toBe(1)
-    for (let i = 0; i < 60 * 10; i++) blend = advanceNightBlend(blend, 0, 1 / 60)
-    expect(blend).toBe(0)
-    expect(advanceNightBlend(0.4, 1, 0)).toBe(0.4)
-  })
-
-  it("fades at the same speed whatever the frame rate", () => {
-    let at60 = 0
-    for (let i = 0; i < 120; i++) at60 = advanceNightBlend(at60, 1, 1 / 60)
-    let at30 = 0
-    for (let i = 0; i < 60; i++) at30 = advanceNightBlend(at30, 1, 1 / 30)
-    expect(at60).toBeCloseTo(at30, 3)
   })
 })

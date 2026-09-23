@@ -5,7 +5,6 @@ import type { GameRoomMenuData, GameRoomMenuPerson } from "~/lib/game-room-menu"
 import { teamRosterFor } from "~/lib/game-room-menu"
 import { teamColor } from "~/lib/team-colors"
 import { GameRoomMenuSprite } from "./GameRoomMenuSprite"
-import { TeamStandings } from "./TeamStandings"
 import {
   cycleGraphicsPreference,
   graphicsPreferenceHint,
@@ -43,8 +42,7 @@ export interface GameRoomMenuProps {
   onOpenChange: (open: boolean) => void
   touchControlsVisible?: boolean
   showTrigger?: boolean
-  /** The event roster, for the Team section's standings and for showing a
-   * team that isn't yours. */
+  /** The roster, for showing a team that isn't yours. */
   teams?: TeamDTO[]
   /** A desk the player walked up to: the Team section shows THAT team, and
    * opening the menu lands on it. Null means your own team, as before. */
@@ -92,14 +90,6 @@ function TeamSection({
   // because you are looking at the team rather than at your colleagues.
   const focused = focusTeamIdx === null ? null : teams[focusTeamIdx] ?? null
   const members = focused ? teamRosterFor(teams, focusTeamIdx!) : data.peers
-  // Standings belong to a team, and a mentor is not on one — data.me.teamIdx
-  // falls back to 0 for them, which would show them TEAM 01's P&L as if it
-  // were theirs.
-  const standingsTeamId = focused
-    ? focused.id
-    : data.me.role === "student"
-      ? teams[data.me.teamIdx]?.id ?? null
-      : null
 
   return (
     <div className="game-room-menu-team">
@@ -113,7 +103,6 @@ function TeamSection({
           {focused.name}
         </p>
       )}
-      {standingsTeamId && <TeamStandings teamId={standingsTeamId} />}
       <TeamMembers members={members} emptyLabel={data.me.role === "mentor" ? "NO OTHER MENTORS FOUND" : "NO TEAMMATES FOUND"} />
     </div>
   )

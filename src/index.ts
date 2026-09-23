@@ -20,7 +20,8 @@ export { GameRoom, type GameRoomProps } from "./gameroom/GameRoom"
 export { default as GameRoom3D, type GameRoom3DProps } from "./components/gameRoom3d/GameRoom3D"
 export { Room3DViewport } from "./components/gameRoom3d/Room3DViewport"
 export type { RoomSceneHandle, RoomSelfState, RoomPlayerInput } from "./components/gameRoom3d/scene"
-export { SCREEN_PAGES, type ScreenPage } from "./components/gameRoom3d/screen-pages"
+export { type RoomBoard, BOARD_MAX_LINES } from "./components/gameRoom3d/wall"
+export { useBulletin, type RoomBulletin, BULLETIN_DEFAULT_HOLD_MS } from "./components/gameRoom3d/useBulletin"
 export { qualitySettings, resolveQualityTier, type QualityTier } from "./components/gameRoom3d/quality-tier"
 export { PARTICIPANT_TABLES, CW, CH, TILE } from "./components/gameRoom/constants"
 export { roomTitle, setRoomTitle } from "./components/gameRoom3d/room-branding"
@@ -29,17 +30,12 @@ export { roomTitle, setRoomTitle } from "./components/gameRoom3d/room-branding"
 export { GameRoomMenu, type GameRoomMenuProps } from "./components/gameRoom3d/GameRoomMenu"
 export { GameRoomChatPanel } from "./components/gameRoom3d/GameRoomChatPanel"
 export { GameRoomDialogBox } from "./components/gameRoom3d/GameRoomDialogBox"
-export { PresentationBanner } from "./components/gameRoom3d/PresentationBanner"
-export { WinnersBanner } from "./components/gameRoom3d/WinnersBanner"
 export { RoomTouchControls, RotateToLandscape, useCoarsePointer, useIsPortrait } from "./components/gameRoom3d/TouchControls"
 export { RoomToast } from "./components/RoomToast"
 export { StudentSelector } from "./components/StudentSelector"
 
 // ----------------------------------------------------------- multiplayer
 export { useGameRoomNet, type GameRoomNet, type GameRoomDialog, type GameRoomChatLine } from "./components/gameRoom3d/useGameRoomNet"
-export { useDoors, type Doors } from "./components/gameRoom3d/useDoors"
-export { useSessionClock } from "./components/gameRoom3d/useSessionClock"
-export { useMarketNews, marketNewsHeader, type MarketNews } from "./components/gameRoom3d/useMarketNews"
 export { useSnapMic } from "./components/gameRoom3d/useSnapMic"
 
 // ------------------------------------------------------ character + sprites
@@ -73,13 +69,9 @@ export {
   MAX_HOLD_SECONDS,
   MIN_HOLD_SECONDS,
   parseBulletinInput,
-  parseScreenPageInput,
   type BulletinInput,
 } from "./lib/game-room-control"
 export { ROOM_MUSIC_CHOICES, parseRoomMusicInput, roomMusicRequest, type RoomMusic } from "./lib/game-room-music"
-export { ANNOUNCEMENT_VOICES, DEFAULT_ANNOUNCEMENT_VOICE_ID } from "./lib/announcement-voices"
-export { roomPresentation, type PresentationState } from "./lib/presentation-order"
-export { roomWinners, type WinnersState, type PodiumPlace } from "./lib/winners-ceremony"
 
 // ------------------------------------------------------------------- audio
 export { AudioProvider, SiteAudioControls, useSiteAudio, usePageMusic } from "./components/SiteAudio"
@@ -95,12 +87,9 @@ export {
 export { buildAllPlayers, type TeamDTO, type FlatPlayer, type PlayerRole } from "./lib/event-types"
 export { projectGameRoomMenuData, teamRosterFor, type GameRoomMenuData, type GameRoomMenuPerson } from "./lib/game-room-menu"
 export { teamColor } from "./lib/team-colors"
-export { teamRanksByIndex } from "./lib/team-ranks"
-export type { ExLeaderboardRow } from "./lib/exchange-types"
 export { normalizeRole, KNOWN_ROLES, type Role } from "./lib/auth"
 
 // --------------------------------------------------------------- plumbing
 export { configureGameRoomApi } from "./server/client"
-export { openDoors, type StudentAccessView } from "./server/student-access"
 export { setAnalyticsActor, setAnalyticsSink, type AnalyticsRecord } from "./lib/analytics"
 export { setLogSink, resetLogSink, type LogRecord } from "./lib/logger"

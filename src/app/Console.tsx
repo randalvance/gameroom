@@ -1,10 +1,8 @@
 // The gamemaster's console.
 //
-// One card in the event site's admin console, lifted whole: pin the wall
-// screen, put music on the PA, push a bulletin at the room, draw the
-// presentation running order and read out the podium. Every button is a
-// command to the hub, so what it changes is the ROOM — open this in a second
-// window and watch the first one obey.
+// One card: put music on the PA and push a bulletin at the room. Every
+// button is a command to the hub, so what it changes is the ROOM — open this
+// in a second window and watch the first one obey.
 //
 // The host supplies the frame and the toasts; the panel supplies the controls.
 
