@@ -399,12 +399,19 @@ export function useGameRoomNet({ hub = false, me = null }: GameRoomNetOptions = 
     : null
   const localVisitorRef = useRef(localVisitor)
   localVisitorRef.current = localVisitor
-  /** Each plant's script progress for this visitor, kept for the visit. */
-  const localSayCountRef = useRef(new Map<string, number>())
+  /** Each plant's script progress, and whose it is: a visit's discoveries
+   * belong to the person who made them, not to the keyboard. */
+  const localDiscoveryRef = useRef<{ visitorId: string | null; counts: Map<string, number> }>({ visitorId: null, counts: new Map() })
 
   useEffect(() => {
     if (localKey === null) return
     const visitor = localVisitorRef.current!
+    if (localDiscoveryRef.current.visitorId !== visitor.id) {
+      // Someone else at the keyboard: the plants start over for them, and the
+      // hatch is theirs to find. A rename or a new outfit is the same person.
+      localDiscoveryRef.current = { visitorId: visitor.id, counts: new Map() }
+      setBackroomsUnlocked(false)
+    }
     const s = emptySession()
     const spawn = visitorSpawnPoint(LOCAL_PLAYER_IDX)
     s.myIdx = LOCAL_PLAYER_IDX
@@ -456,7 +463,7 @@ export function useGameRoomNet({ hub = false, me = null }: GameRoomNetOptions = 
     if (dialogRef.current) return
     const obj = roomObjectByIdx(targetIdx)
     if (!obj) return
-    const counts = localSayCountRef.current
+    const counts = localDiscoveryRef.current.counts
     const count = (counts.get(obj.id) ?? 0) + 1
     counts.set(obj.id, count)
     const text = objectSpeech(obj.id, count)

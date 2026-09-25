@@ -301,6 +301,34 @@ describe("a room with no hub", () => {
     expect(net.myPlayerIdx).toBeNull()
   })
 
+  it("keeps a visitor's plant progress through a rename, and starts over for someone else", () => {
+    vi.useFakeTimers()
+    try {
+      const view = render(<Probe options={{ hub: false, me }} />)
+      const handle = makeHandle()
+      act(() => net.onSceneReady(handle as never))
+      const plant = roomObjectIdx("plant-se")
+      for (let i = 0; i < BACKROOMS_UNLOCK_COUNT; i++) {
+        act(() => net.onInteract(plant))
+        act(() => { vi.advanceTimersByTime(net.dialog!.ms + 1) })
+      }
+      expect(net.backroomsUnlocked).toBe(true)
+
+      view.rerender(<Probe options={{ hub: false, me: { ...me, name: "Renamed", spriteId: 9 } }} />)
+      expect(net.backroomsUnlocked).toBe(true)
+      act(() => net.onInteract(plant))
+      expect(net.dialog?.text).not.toBe("It's just a normal plant...")
+      act(() => { vi.advanceTimersByTime(net.dialog!.ms + 1) })
+
+      view.rerender(<Probe options={{ hub: false, me: { id: "user-other", name: "Other" } }} />)
+      expect(net.backroomsUnlocked).toBe(false)
+      act(() => net.onInteract(plant))
+      expect(net.dialog?.text).toBe("It's just a normal plant...")
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it("answers the plants itself, and unlocks the hatch on the same count as the hub", () => {
     vi.useFakeTimers()
     try {

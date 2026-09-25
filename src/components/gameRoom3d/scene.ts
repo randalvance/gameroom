@@ -159,6 +159,8 @@ interface AgentState {
     seat: { table: number; seat: number } | null
     /** A fade-out in progress, after which the character is removed. */
     leaving: { startedAt: number } | null
+    /** The sheet it was drawn from, as the host asked for it. */
+    sprite: number | string | undefined
     /** Whose trail it walks, and how far back — null for a root. */
     follow: FollowSlot | null
     /** Which way it last walked while following. */
@@ -1312,6 +1314,37 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
             return charSheets[((idx % charSheets.length) + charSheets.length) % charSheets.length]!
         }
 
+        /** Redraw a character from another sheet, keeping everything else. */
+        const applyCharSheet = (c: CharState, source: THREE.Texture) => {
+            const img = source.image as HTMLImageElement
+            const format = sheetFormatFor(img.width, img.height)
+            const tex = source.clone()
+            tex.repeat.set(1 / format.cols, 1 / format.rows)
+            c.texture.dispose()
+            c.texture = tex
+            c.material.map = tex
+            c.material.needsUpdate = true
+            if (format.cellW !== c.format.cellW || format.cellH !== c.format.cellH) {
+                c.mesh.geometry = planeForSheet(format)
+                for (const child of c.mesh.children) {
+                    if ((child as THREE.Mesh).geometry === blobGeo) child.position.y = characterShadowLocalY(format)
+                }
+            }
+            c.format = format
+        }
+
+        /** The host changed an agent's sprite: decode it and swap the sheet,
+         * unless the agent has changed again (or gone) by the time it lands. */
+        const refreshAgentSheet = (c: CharState, agent: RoomAgentInput) => {
+            const state = c.agent!
+            if (state.sprite === agent.sprite) return
+            state.sprite = agent.sprite
+            void sourceForAgent(agent).then((source) => {
+                if (cleanedUp || agentChars.get(agent.id) !== c || c.agent?.sprite !== agent.sprite) return
+                applyCharSheet(c, source)
+            })
+        }
+
         const clearStatusBubble = (c: CharState) => {
             const bubble = c.agent?.bubble
             if (!c.agent || !bubble) return
@@ -1385,7 +1418,15 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
         const upsertAgentChar = (agent: RoomAgentInput) => {
             const existing = agentChars.get(agent.id)
             if (existing?.agent) {
-                if (existing.agent.leaving) return
+                if (existing.agent.leaving) {
+                    // Back before its fade finished: it stays, and the fade is
+                    // undone — the seat was never freed, so it is still its own.
+                    existing.agent.leaving = null
+                    existing.material.alphaTest = 0.5
+                    existing.material.depthWrite = true
+                    existing.material.needsUpdate = true
+                }
+                refreshAgentSheet(existing, agent)
                 applyAgentLook(existing, agent)
                 return
             }
@@ -1420,6 +1461,9 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                     bubble: null,
                     seat,
                     leaving: null,
+                    // The sheet decoded is the one first asked for; a sprite that
+                    // changed while it was decoding is picked up just below.
+                    sprite: agent.sprite,
                     follow: null,
                     followDir: FACING_CAMERA,
                     trail: [],
@@ -1428,6 +1472,7 @@ export async function createRoomScene(container: HTMLElement, opts: CreateRoomOp
                 // Walk in from the aisle to the desk's orbit (or the family's
                 // line) over a beat.
                 if (seat || latest.follow) c.transition = { fromX: c.x, fromZ: c.z, startedAt: performance.now(), duration: AGENT_WALK_IN_MS }
+                refreshAgentSheet(c, latest)
                 applyAgentLook(c, latest)
             })()
         }
