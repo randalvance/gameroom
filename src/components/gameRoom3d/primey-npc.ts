@@ -43,7 +43,7 @@ const SECOND_TO_LAST_ROW = Math.floor((CH - WALL_Y) / CARPET_TILE_PX) - 1
  * Which tile column Primey stands in.
  *
  * Dead centre would be column 12, and it looked right — but the room's
- * arrivals scatter (guestSpawnPoint) covers x 340–479 on this very row, so
+ * arrivals scatter (visitorSpawnPoint) covers x 340–479 on this very row, so
  * visitors were materialising inside the billboard. Worse than the look: a
  * character standing on Primey also SHADOWS him in the interact probe, which
  * takes the nearest candidate — a press meant for the chat panel would talk to

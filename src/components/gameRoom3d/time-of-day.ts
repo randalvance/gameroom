@@ -17,7 +17,6 @@
 // minute of the day at which the room visibly changes state. That also means
 // the assets outside can stay colourless: three white city silhouettes get
 // tinted per hour rather than authored four times over.
-import { SGT } from "../../lib/time"
 
 export const MINUTES_PER_DAY = 24 * 60
 
@@ -216,23 +215,12 @@ function mixColor(a: number, b: number, t: number): number {
   return (r << 16) | (g << 8) | bl
 }
 
-/**
- * Minutes since midnight in Singapore.
- *
- * Pinned to the venue's clock, not the viewer's: a judge watching from London
- * should see the room as it looks in the hall, and API reference §5 already
- * requires SGT for everything user-facing.
- */
-export function sgtMinutes(now: Date): number {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: SGT, hour: "2-digit", minute: "2-digit", hour12: false,
-  }).formatToParts(now)
-  const value = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? 0)
-  // Intl renders midnight as "24" in some engines and "00" in others.
-  return (value("hour") % 24) * 60 + value("minute")
+/** Minutes since midnight on the viewer's clock. */
+export function localMinutes(now: Date): number {
+  return now.getHours() * 60 + now.getMinutes()
 }
 
-/** The sky and lighting at a given minute of the Singapore day. */
+/** The sky and lighting at a given minute of the day. */
 export function skyPalette(minute: number): SkyPalette {
   const m = ((minute % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY
   // Find the pair straddling `m`. Past the last keyframe we wrap to the first,
@@ -273,7 +261,7 @@ const NAMED_TIMES: Record<string, number> = {
 /**
  * Reads `?tod=` off a query string: either a name from the table above or a
  * plain `HH:MM`. Anything unrecognised returns null rather than throwing or
- * guessing, so a typo quietly leaves the room on the real Singapore clock.
+ * guessing, so a typo quietly leaves the room on the real clock.
  */
 export function parseTimeOverride(search: string): number | null {
   const raw = new URLSearchParams(search).get("tod")?.trim().toLowerCase()
@@ -286,57 +274,4 @@ export function parseTimeOverride(search: string): number | null {
   const min = Number(clock[2])
   if (h > 23 || min > 59) return null
   return h * 60 + min
-}
-
-// ------------------------------------------------------------ forced night
-
-/**
- * The minute the winners' ceremony turns the sky to: 20:45, the night
- * keyframe with the city's windows at their brightest. Fireworks want a dark
- * sky, but not the dead-of-night one with half the towers gone home.
- */
-export const NIGHT_SHOW_MINUTE = 20 * 60 + 45
-
-/**
- * Is it already dark outside at this minute? Dusk's blue hour (19:30) to the
- * blue hour before sunrise (06:15) — the span where the palette has the
- * windows lit and the haze down to night.
- */
-export function isNightMinute(minute: number): boolean {
-  const m = ((minute % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY
-  return m >= 19 * 60 + 30 || m < 6 * 60 + 15
-}
-
-/**
- * How far towards the forced night the room should be: all the way while a
- * ceremony runs by daylight, and not at all otherwise — a room that is
- * already dark is left on its own clock rather than nudged to a different
- * night, so the sky does not visibly shift for nothing.
- */
-export function nightBlendTarget(minute: number, ceremonyRunning: boolean): 0 | 1 {
-  return ceremonyRunning && !isNightMinute(minute) ? 1 : 0
-}
-
-/** The palette `t` of the way from `a` to `b`, every channel and scalar. */
-export function mixPalette(a: SkyPalette, b: SkyPalette, t: number): SkyPalette {
-  if (t <= 0) return a
-  if (t >= 1) return b
-  const out = {} as SkyPalette
-  for (const k of COLOR_KEYS) out[k] = mixColor(a[k], b[k], t)
-  for (const k of SCALAR_KEYS) out[k] = a[k] + (b[k] - a[k]) * t
-  return out
-}
-
-/**
- * How much of the remaining distance to the night (or back) survives one
- * second. The room takes a few seconds to fall dark: a cut would read as a
- * glitch, and the ceremony has a moment to spare while the camera turns.
- */
-export const NIGHT_BLEND_KEEP_PER_SECOND = 0.35
-
-/** One frame of the fade, `dt` seconds long. */
-export function advanceNightBlend(current: number, target: number, dt: number): number {
-  if (dt <= 0) return current
-  const next = target + (current - target) * Math.pow(NIGHT_BLEND_KEEP_PER_SECOND, dt)
-  return Math.abs(next - target) < 1e-3 ? target : next
 }

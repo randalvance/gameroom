@@ -37,24 +37,24 @@ describe("parseRoomMusicInput", () => {
 
 describe("roomMusicRequest", () => {
   it("plays the room's own playlist with no command, whoever is listening", () => {
-    for (const role of ["admin", "viewer", "student", "mentor"]) {
+    for (const role of ["host", "screen", "visitor"]) {
       expect(roomMusicRequest(null, role)).toBe(GAME_ROOM_MUSIC)
       expect(roomMusicRequest(undefined, role)).toBe(GAME_ROOM_MUSIC)
     }
   })
 
   it("loops the chosen track, or goes silent, on the PA screens", () => {
-    for (const role of ["admin", "viewer"]) {
+    for (const role of ["host", "screen"]) {
       expect(roomMusicRequest({ mode: "track", track: "/theme.mp3" }, role)).toBe("/theme.mp3")
       expect(roomMusicRequest({ mode: "stop" }, role)).toEqual([])
     }
   })
 
-  // The command is for the projector and the big screen. A student's laptop
+  // The command is for the projector and the big screen. A visitor's laptop
   // is not the room's PA, so it is left to its own playlist — the same split
   // as the filmed broadcasts.
   it("leaves every other screen on the room's playlist", () => {
-    for (const role of ["student", "mentor", "judge"]) {
+    for (const role of ["visitor", "anything-else"]) {
       expect(roomMusicRequest({ mode: "track", track: "/theme.mp3" }, role)).toBe(GAME_ROOM_MUSIC)
       expect(roomMusicRequest({ mode: "stop" }, role)).toBe(GAME_ROOM_MUSIC)
     }

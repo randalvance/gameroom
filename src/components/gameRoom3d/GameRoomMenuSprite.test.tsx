@@ -1,8 +1,8 @@
 import { render, screen } from "@testing-library/react"
 import { describe, expect, it, vi } from "vitest"
-import { CUSTOM_SPRITE_ID } from "~/lib/roster"
+import { CUSTOM_SPRITE_ID } from "~/lib/sprites"
 import type { GameRoomMenuPerson } from "~/lib/game-room-menu"
-import { GameRoomMenuSprite } from "./GameRoomMenuSprite"
+import { agentSheetUrl, GameRoomMenuSprite } from "./GameRoomMenuSprite"
 
 vi.mock("~/components/sprite/SpriteWalkPreview", () => ({
   SpriteWalkPreview: ({ src, scale, rows, label }: { src: string; scale: number; rows: number[]; label: string }) => (
@@ -12,12 +12,11 @@ vi.mock("~/components/sprite/SpriteWalkPreview", () => ({
 
 function person(overrides: Partial<GameRoomMenuPerson> = {}): GameRoomMenuPerson {
   return {
-    id: "student-1",
+    id: "visitor-1",
     name: "Ada",
-    role: "student",
+    role: "visitor",
     spriteId: 3,
     spriteSheet: null,
-    teamName: "TEAM ALPHA",
     playerIdx: 0,
     teamIdx: 0,
     ...overrides,
@@ -50,5 +49,15 @@ describe("GameRoomMenuSprite", () => {
     expect(preview.getAttribute("data-src")).toMatch(/^\/assets\/room\/characters\/char_\d+\.png$/)
     expect(preview.getAttribute("data-scale")).toBe("2")
     expect(preview.getAttribute("data-rows")).toBe("0")
+  })
+})
+
+describe("agentSheetUrl", () => {
+  it("uses a stock index, a URL, or a sheet derived from the id", () => {
+    expect(agentSheetUrl({ id: "a", sprite: 3 })).toBe("/assets/room/characters/char_3.png")
+    expect(agentSheetUrl({ id: "a", sprite: 3 + 132 })).toBe("/assets/room/characters/char_3.png")
+    expect(agentSheetUrl({ id: "a", sprite: "/sheets/custom.png" })).toBe("/sheets/custom.png")
+    expect(agentSheetUrl({ id: "a" })).toMatch(/^\/assets\/room\/characters\/char_\d+\.png$/)
+    expect(agentSheetUrl({ id: "a" })).toBe(agentSheetUrl({ id: "a" }))
   })
 })

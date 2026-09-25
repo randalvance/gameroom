@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useState } from "react"
 import { SiteAudioControls } from "~/components/SiteAudio"
-import type { TeamDTO } from "~/lib/event-types"
+import { bubbleTextFor, effectiveStatus, styleFor, type Agent, type StatusStyleOverrides } from "~/lib/agents"
 import type { GameRoomMenuData, GameRoomMenuPerson } from "~/lib/game-room-menu"
-import { teamRosterFor } from "~/lib/game-room-menu"
-import { teamColor } from "~/lib/team-colors"
-import { GameRoomMenuSprite } from "./GameRoomMenuSprite"
-import { TeamStandings } from "./TeamStandings"
+import { GameRoomMenuAgentSprite, GameRoomMenuSprite } from "./GameRoomMenuSprite"
 import {
   cycleGraphicsPreference,
   graphicsPreferenceHint,
@@ -15,7 +12,7 @@ import {
   type GraphicsPreference,
 } from "./quality-tier"
 
-const ITEMS = ["Profile", "Team", "Options"] as const
+const ITEMS = ["Profile", "Agents", "Options"] as const
 type GameRoomMenuItem = (typeof ITEMS)[number]
 
 const ROOM_CONTROL_KEYS = new Set([
@@ -43,12 +40,9 @@ export interface GameRoomMenuProps {
   onOpenChange: (open: boolean) => void
   touchControlsVisible?: boolean
   showTrigger?: boolean
-  /** The event roster, for the Team section's standings and for showing a
-   * team that isn't yours. */
-  teams?: TeamDTO[]
-  /** A desk the player walked up to: the Team section shows THAT team, and
-   * opening the menu lands on it. Null means your own team, as before. */
-  focusTeamIdx?: number | null
+  /** The agents in the room, for the Agents section. */
+  agents?: readonly Agent[]
+  statusStyles?: StatusStyleOverrides
   /**
    * Push a GRAPHICS change into the live scene. Optional so the menu can be
    * rendered (and tested) without a room behind it; the choice is stored
@@ -66,9 +60,7 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
 }
 
 function ProfileSection({ person }: { person: GameRoomMenuPerson }) {
-  const affiliation = person.role === "student"
-    ? `TEAM: ${person.teamName ?? "UNASSIGNED"}`
-    : `ROLE: ${person.role.toUpperCase()}`
+  const affiliation = `ROLE: ${person.role.toUpperCase()}`
   return (
     <div className="game-room-menu-profile">
       <div className="game-room-menu-profile-sprite"><GameRoomMenuSprite person={person} scale={3} /></div>
@@ -79,42 +71,30 @@ function ProfileSection({ person }: { person: GameRoomMenuPerson }) {
   )
 }
 
-function TeamSection({
-  data,
-  teams = [],
-  focusTeamIdx = null,
-}: {
-  data: GameRoomMenuData
-  teams?: TeamDTO[]
-  focusTeamIdx?: number | null
-}) {
-  // A desk in focus shows THAT team — everyone on it, the player included,
-  // because you are looking at the team rather than at your colleagues.
-  const focused = focusTeamIdx === null ? null : teams[focusTeamIdx] ?? null
-  const members = focused ? teamRosterFor(teams, focusTeamIdx!) : data.peers
-  // Standings belong to a team, and a mentor is not on one — data.me.teamIdx
-  // falls back to 0 for them, which would show them TEAM 01's P&L as if it
-  // were theirs.
-  const standingsTeamId = focused
-    ? focused.id
-    : data.me.role === "student"
-      ? teams[data.me.teamIdx]?.id ?? null
-      : null
-
+function AgentsSection({ agents, statusStyles }: { agents: readonly Agent[]; statusStyles?: StatusStyleOverrides }) {
+  if (agents.length === 0) {
+    return <div className="game-room-menu-empty">NO AGENTS IN THE ROOM</div>
+  }
   return (
     <div className="game-room-menu-team">
-      {focused && (
-        <p className="game-room-menu-team-name">
-          <span
-            className="game-room-menu-team-swatch"
-            style={{ background: teamColor(focused.name) }}
-            data-testid="team-swatch"
-          />
-          {focused.name}
-        </p>
-      )}
-      {standingsTeamId && <TeamStandings teamId={standingsTeamId} />}
-      <TeamMembers members={members} emptyLabel={data.me.role === "mentor" ? "NO OTHER MENTORS FOUND" : "NO TEAMMATES FOUND"} />
+      <div className="game-room-menu-team-list">
+        {agents.map((agent) => {
+          const status = effectiveStatus(agent, agents)
+          const style = styleFor(status, statusStyles)
+          const line = bubbleTextFor(agent, style)
+          return (
+            <div key={agent.id} data-testid={`game-room-agent-${agent.id}`} className="game-room-menu-team-member">
+              <div className="game-room-menu-team-sprite"><GameRoomMenuAgentSprite agent={agent} scale={2} /></div>
+              <div className="game-room-menu-team-copy">
+                <p className="game-room-menu-person-name">{agent.name}</p>
+                <p className="game-room-menu-person-id" style={style.halo ? { color: style.halo } : undefined}>
+                  {status.toUpperCase()}{line ? ` · ${line}` : ""}
+                </p>
+              </div>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -151,26 +131,7 @@ function OptionsSection({
   )
 }
 
-function TeamMembers({ members, emptyLabel }: { members: GameRoomMenuPerson[]; emptyLabel: string }) {
-  if (members.length === 0) {
-    return <div className="game-room-menu-empty">{emptyLabel}</div>
-  }
-  return (
-    <div className="game-room-menu-team-list">
-      {members.map((person) => (
-        <div key={person.id} data-testid={`game-room-team-member-${person.id}`} className="game-room-menu-team-member">
-          <div className="game-room-menu-team-sprite"><GameRoomMenuSprite person={person} scale={2} /></div>
-          <div className="game-room-menu-team-copy">
-            <p className="game-room-menu-person-name">{person.name}</p>
-            <p className="game-room-menu-person-id">{person.id}</p>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-export function GameRoomMenu({ data, open, onOpenChange, touchControlsVisible = false, showTrigger = true, teams, focusTeamIdx = null, onGraphicsChange }: GameRoomMenuProps) {
+export function GameRoomMenu({ data, open, onOpenChange, touchControlsVisible = false, showTrigger = true, agents = [], statusStyles, onGraphicsChange }: GameRoomMenuProps) {
   const [activeIndex, setActiveIndex] = useState(0)
   const active: GameRoomMenuItem = ITEMS[activeIndex] ?? ITEMS[0]
   // Read after mount, not during render: this route is server-rendered, and
@@ -187,14 +148,6 @@ export function GameRoomMenu({ data, open, onOpenChange, touchControlsVisible = 
       return next
     })
   }, [onGraphicsChange])
-
-  // Walking up to a desk asks for that team, so the menu opens on Team rather
-  // than wherever the player left it. The route clears the focus on close, so
-  // every desk press is a fresh null -> team transition and lands here again.
-  useEffect(() => {
-    if (focusTeamIdx === null) return
-    setActiveIndex(ITEMS.indexOf("Team"))
-  }, [focusTeamIdx])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -315,7 +268,7 @@ export function GameRoomMenu({ data, open, onOpenChange, touchControlsVisible = 
             <p className="game-room-menu-kicker">SECTION</p>
             <h2>{active}</h2>
             {active === "Profile" && <ProfileSection person={data.me} />}
-            {active === "Team" && <TeamSection data={data} teams={teams} focusTeamIdx={focusTeamIdx} />}
+            {active === "Agents" && <AgentsSection agents={agents} statusStyles={statusStyles} />}
             {active === "Options" && <OptionsSection graphics={graphics} onStep={stepGraphics} />}
           </section>
         </div>

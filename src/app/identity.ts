@@ -24,7 +24,7 @@ function fresh(): Identity {
   return {
     id: `visitor-${Math.random().toString(36).slice(2, 10)}`,
     name: "",
-    role: "student",
+    role: "visitor",
     spriteId: null,
     arcadeUnlocked: false,
   }

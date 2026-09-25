@@ -8,7 +8,7 @@
 //
 // Set it once, before the room mounts:
 //
-//     setRoomTitle("#YOURHACKATHON 2027")
+//     setRoomTitle("MY AGENTS")
 
 let title = "THE GAME ROOM"
 

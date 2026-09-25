@@ -156,13 +156,13 @@ describe("screenFocusKeyAction", () => {
     }
   })
 
-  it("turns the page with left and right rather than walking", () => {
-    expect(screenFocusKeyAction("arrowleft", true)).toBe("page-prev")
-    expect(screenFocusKeyAction("arrowright", true)).toBe("page-next")
+  it("swallows left and right rather than walking", () => {
+    expect(screenFocusKeyAction("arrowleft", true)).toBe("swallow")
+    expect(screenFocusKeyAction("arrowright", true)).toBe("swallow")
     // WASD is an alias for the arrows everywhere else in the room, and a
     // player cannot walk sideways while reading anyway.
-    expect(screenFocusKeyAction("a", true)).toBe("page-prev")
-    expect(screenFocusKeyAction("d", true)).toBe("page-next")
+    expect(screenFocusKeyAction("a", true)).toBe("swallow")
+    expect(screenFocusKeyAction("d", true)).toBe("swallow")
   })
 
   it("backs out on down, and walks the character away with it", () => {

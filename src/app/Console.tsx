@@ -1,16 +1,14 @@
 // The gamemaster's console.
 //
-// One card in the event site's admin console, lifted whole: pin the wall
-// screen, put music on the PA, push a bulletin at the room, draw the
-// presentation running order and read out the podium. Every button is a
-// command to the hub, so what it changes is the ROOM — open this in a second
-// window and watch the first one obey.
+// One card: put music on the PA and push a bulletin at the room. Every
+// button is a command to the hub, so what it changes is the ROOM — open this
+// in a second window and watch the first one obey.
 //
 // The host supplies the frame and the toasts; the panel supplies the controls.
 
 import { useEffect, useState } from "react"
 import { GameRoomControlPanel } from "~/components/gamemasterConsole/GameRoomControlPanel"
-import type { TeamDTO } from "~/lib/event-types"
+import type { Agent } from "~/lib/agents"
 
 interface Toast {
   id: number
@@ -21,7 +19,7 @@ interface Toast {
 /** How long a toast stays up. Long enough to read a refusal. */
 const TOAST_MS = 6000
 
-export function Console({ teams, onBack }: { teams: TeamDTO[]; onBack: () => void }) {
+export function Console({ agents, onBack }: { agents: readonly Agent[]; onBack: () => void }) {
   const [toasts, setToasts] = useState<Toast[]>([])
 
   useEffect(() => {
@@ -70,7 +68,7 @@ export function Console({ teams, onBack }: { teams: TeamDTO[]; onBack: () => voi
           GAMEMASTER · GAME ROOM
         </h1>
         <span style={{ color: "#5D6699", fontSize: 14 }}>
-          {teams.length} desks seated · drives every screen in the room
+          {agents.length} agents in the room · drives every screen in it
         </span>
       </header>
 

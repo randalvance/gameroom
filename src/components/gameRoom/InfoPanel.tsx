@@ -1,24 +1,10 @@
 // Selection-info UI for the game room.
-// FF1-style bottom panel showing character / team details.
-import { useEffect, useState } from "react"
+// FF1-style bottom panel showing what was clicked: an agent, or a desk.
 import { useCoarsePointer } from "~/components/gameRoom3d/TouchControls"
-import { type FlatPlayer, type TeamDTO } from "~/lib/event-types"
+import { bubbleTextFor, effectiveStatus, styleFor, type Agent, type StatusStyleOverrides } from "~/lib/agents"
+import type { RoomSelection } from "~/components/gameRoom3d/selection"
 
-export type RoomSelection = { type: "player"; idx: number } | { type: "team"; idx: number } | null
-
-type FbEntry = { mentorName: string; gip: boolean; comment: string; ts: number }
-export type FbStore = Record<string, FbEntry[]>
-
-export function useLocalFeedbacks(): FbStore {
-  const [feedbacks, setFeedbacks] = useState<FbStore>({})
-  useEffect(() => {
-    try {
-      const s = localStorage.getItem("c2i_feedback")
-      if (s) setFeedbacks(JSON.parse(s))
-    } catch { /* ignore */ }
-  }, [])
-  return feedbacks
-}
+export type { RoomSelection }
 
 function FF1Panel({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
   // The touch game-pad floats over the panel's lower-left corner — pad the
@@ -42,52 +28,31 @@ const B: React.CSSProperties = { fontFamily: "var(--font-body)", fontSize: 18, l
 
 interface RoomInfoPanelProps {
   selected: RoomSelection
-  teams: TeamDTO[]
-  allPlayers: FlatPlayer[]
-  feedbacks: FbStore
+  agents: readonly Agent[]
+  statusStyles?: StatusStyleOverrides
   onClose: () => void
 }
 
-export function RoomInfoPanel({ selected, teams, allPlayers, feedbacks, onClose }: RoomInfoPanelProps) {
-  if (!selected) return null
-  if (selected.type === "player") {
-    const p = allPlayers[selected.idx]
-    if (!p) return null
-    const team = teams[p.teamIdx]
-    if (!team) return null
-    return (
-      <FF1Panel onClose={onClose}>
-        <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ flex: "0 0 auto" }}>
-            <div style={{ ...D, color: "#FFD040", marginBottom: 6 }}>&gt; CHARACTER INFO</div>
-            <div style={{ ...D, fontSize: 13, color: "#FFF", marginBottom: 4 }}>{p.name.toUpperCase()}</div>
-            <div style={{ ...B, color: "#7080C0", fontSize: 16 }}>{team.name}</div>
-          </div>
-        </div>
-      </FF1Panel>
-    )
-  }
-  const team = teams[selected.idx]
-  if (!team) return null
+export function RoomInfoPanel({ selected, agents, statusStyles, onClose }: RoomInfoPanelProps) {
+  if (!selected || selected.type !== "agent") return null
+  const agent = agents.find((candidate) => candidate.id === selected.id)
+  if (!agent) return null
+  const status = effectiveStatus(agent, agents)
+  const style = styleFor(status, statusStyles)
+  const line = bubbleTextFor(agent, style)
+  const parent = agent.parentId ? agents.find((candidate) => candidate.id === agent.parentId) : undefined
   return (
     <FF1Panel onClose={onClose}>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div style={{ flex: "0 0 auto" }}>
-          <div style={{ ...D, color: "#FFD040", marginBottom: 6 }}>&gt; TEAM INFO</div>
-          <div style={{ ...D, fontSize: 13, color: "#FFF", marginBottom: 4 }}>{team.name}</div>
-        </div>
-        <div style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ ...D, color: "#3050C8", marginBottom: 6 }}>&gt; ROSTER</div>
-          {team.players.map((p) => {
-            const pE = feedbacks[p.id] ?? []
-            const gy = pE.filter((e) => e.gip).length
-            return (
-              <div key={p.id} style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 5, padding: "4px 6px", background: "#080C1E", border: "1px solid #1A2050" }}>
-                <span style={{ ...B, fontSize: 17, color: "#FFF", flex: 1 }}>{p.name}</span>
-                {gy > 0 && <span style={{ ...D, fontSize: 8, color: "#39FF14" }}>★{gy}</span>}
-              </div>
-            )
-          })}
+          <div style={{ ...D, color: "#FFD040", marginBottom: 6 }}>&gt; AGENT</div>
+          <div data-testid="info-agent-name" style={{ ...D, fontSize: 13, color: "#FFF", marginBottom: 4 }}>{agent.name.toUpperCase()}</div>
+          <div data-testid="info-agent-status" style={{ ...B, color: style.halo ?? "#7080C0", fontSize: 16 }}>
+            {status.toUpperCase()}
+            {status !== agent.status ? ` (${agent.status.toUpperCase()}, A SUB-AGENT IS WORKING)` : ""}
+          </div>
+          {line && <div style={{ ...B, color: "#A0B8FF", fontSize: 16 }}>{line}</div>}
+          {parent && <div style={{ ...B, color: "#7080C0", fontSize: 14 }}>FOLLOWS {parent.name.toUpperCase()}</div>}
         </div>
       </div>
     </FF1Panel>

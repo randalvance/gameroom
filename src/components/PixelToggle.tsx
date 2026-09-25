@@ -5,7 +5,7 @@
 type PixelToggleProps = {
   checked: boolean
   onChange: (next: boolean) => void
-  /** Accessible name — what the switch controls, e.g. "Student trading". */
+  /** Accessible name — what the switch controls, e.g. "Music". */
   label: string
   disabled?: boolean
   onText?: string

@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react"
 import { fireEvent } from "@testing-library/dom"
 import { describe, expect, it, vi } from "vitest"
 
-import { CUSTOM_SPRITE_ID, SPRITE_COUNT } from "~/lib/roster"
+import { CUSTOM_SPRITE_ID, SPRITE_COUNT } from "~/lib/sprites"
 import { CharacterPicker } from "./CharacterPicker"
 
 const SHEET = "data:image/png;base64,iVBORw0KGgo="

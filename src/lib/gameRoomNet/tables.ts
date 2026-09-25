@@ -26,7 +26,6 @@
 
 import { PARTICIPANT_TABLES } from "../../components/gameRoom/constants"
 import type { WalkDir } from "../../components/gameRoom/spriteIndex"
-import { tableHasTeam } from "../../components/gameRoom3d/team-tables"
 import {
   DIR_VEC,
   INTERACT_PROBE_PX,
@@ -56,7 +55,6 @@ function distSqToRect(
 export function resolveRoomInteract(
   self: { x: number; y: number; dir: WalkDir },
   candidates: readonly ProbeCandidate[],
-  teamCount: number,
 ): RoomInteractTarget | null {
   const hit = interactTarget(self, candidates)
 
@@ -66,7 +64,6 @@ export function resolveRoomInteract(
   let bestIdx: number | null = null
   let bestDist = INTERACT_RANGE_PX * INTERACT_RANGE_PX
   PARTICIPANT_TABLES.forEach((tbl, tableIdx) => {
-    if (!tableHasTeam(tableIdx, teamCount)) return
     const d = distSqToRect(px, py, tbl)
     if (d <= bestDist) {
       bestDist = d

@@ -2,14 +2,10 @@ import { describe, expect, it } from "vitest"
 import { roleHaloColor } from "./role-colors"
 
 describe("roleHaloColor", () => {
-  it("uses green for students", () => expect(roleHaloColor("student")).toBe(0x40ff88))
-  it("uses red for mentors and judges", () => {
-    expect(roleHaloColor("mentor")).toBe(0xff4040)
-    expect(roleHaloColor("judge")).toBe(0xff4040)
-  })
-  it("uses yellow for admins", () => expect(roleHaloColor("admin")).toBe(0xffd040))
-  it("keeps legacy or roleless characters green", () => {
+  it("rings a visitor green, a host gold and a screen red", () => {
+    expect(roleHaloColor("visitor")).toBe(0x40ff88)
     expect(roleHaloColor(undefined)).toBe(0x40ff88)
-    expect(roleHaloColor("viewer")).toBe(0x40ff88)
+    expect(roleHaloColor("host")).toBe(0xffd040)
+    expect(roleHaloColor("screen")).toBe(0xff4040)
   })
 })

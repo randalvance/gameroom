@@ -3,7 +3,7 @@
 // and future server code can import it without dragging in the canvas init
 // path. Directions follow walkPos: 0=up 1=right 2=down 3=left.
 import { CHAR_COUNT } from "./assets"
-import { CUSTOM_SPRITE_ID, isSharedSpriteId, sharedSpriteUrl } from "~/lib/roster"
+import { CUSTOM_SPRITE_ID, isSharedSpriteId, sharedSpriteUrl } from "~/lib/sprites"
 import { SPRITE_COLS, SPRITE_ROWS, WALK_FRAME_SEQUENCE } from "~/lib/sprite-gen"
 
 export function characterIdForPlayer(playerIdx: number, teamIdx: number): number {

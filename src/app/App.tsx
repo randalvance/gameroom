@@ -8,37 +8,25 @@
 //   CONSOLE   the gamemaster's controls (<GameRoomControlPanel>) — open it in
 //             a second window and drive the room in the first.
 //
-// The host owns identity, persistence and routing. The room owns the room.
+// The host owns identity, persistence, routing — and the agents. The room
+// owns the room. The demo's agents come from a pretend runtime that changes
+// them on a timer (demo-runtime.ts); a real host hands in its own list.
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { AudioProvider } from "~/components/SiteAudio"
-import { GameRoom } from "~/gameroom/GameRoom"
-import { buildAllPlayers, type TeamDTO } from "~/lib/event-types"
-import type { GameRoomMenuData } from "~/lib/game-room-menu"
+import { GameRoom, type GameRoomHandle } from "~/gameroom/GameRoom"
+import type { RoomBulletin } from "~/components/gameRoom3d/useBulletin"
+import { countByStatus } from "~/lib/agents"
 import { loadIdentity, publishIdentityCookie, saveIdentity, type Identity } from "./identity"
 import { Wardrobe } from "./Wardrobe"
 import { Console } from "./Console"
 import { RoomHeader } from "./RoomHeader"
+import { useDemoRuntime } from "./demo-runtime"
+
+/** How long the demo's bulletin holds the wall. */
+const BULLETIN_HOLD_SECONDS = 8
 
 type Screen = "wardrobe" | "room" | "console"
-
-/** The demo's roster, straight from the hub. */
-function useTeams(): TeamDTO[] | null {
-  const [teams, setTeams] = useState<TeamDTO[] | null>(null)
-  useEffect(() => {
-    let alive = true
-    fetch("/api/roster")
-      .then((res) => (res.ok ? res.json() : []))
-      .then((rows: TeamDTO[]) => alive && setTeams(rows))
-      // No hub, no roster: an empty room still renders, and the banner above
-      // it says why.
-      .catch(() => alive && setTeams([]))
-    return () => {
-      alive = false
-    }
-  }, [])
-  return teams
-}
 
 export function App() {
   const [identity, setIdentity] = useState<Identity>(() => loadIdentity())
@@ -47,7 +35,21 @@ export function App() {
   const [screen, setScreen] = useState<Screen>(() =>
     window.location.hash === "#console" ? "console" : "wardrobe",
   )
-  const teams = useTeams()
+  const [running, setRunning] = useState(true)
+  const agents = useDemoRuntime(running)
+  const [room, setRoom] = useState<GameRoomHandle | null>(null)
+  // A bulletin is raised by handing in a new object; the room takes it down.
+  const [bulletin, setBulletin] = useState<RoomBulletin | null>(null)
+  const raiseBulletin = useCallback(() => {
+    const { waiting, error } = countByStatus(agents)
+    const text =
+      waiting > 0
+        ? `${waiting} ${waiting === 1 ? "agent is" : "agents are"} waiting for you.`
+        : error > 0
+          ? `${error} ${error === 1 ? "agent needs" : "agents need"} a look: something failed.`
+          : `All ${agents.length} agents are fine. Nothing needs you right now.`
+    setBulletin({ text, holdSeconds: BULLETIN_HOLD_SECONDS })
+  }, [agents])
 
   const commit = useCallback((next: Identity) => {
     setIdentity(next)
@@ -72,30 +74,10 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // What the pause menu shows. A demo visitor is a guest rather than a seated
-  // student, so this is built by hand instead of being projected off a roster
-  // row — the same shape either way.
-  const menu = useMemo<GameRoomMenuData>(
-    () => ({
-      me: {
-        id: identity.id,
-        name: identity.name || "Visitor",
-        role: identity.role,
-        spriteId: identity.spriteId,
-        spriteSheet: null,
-        teamName: null,
-        playerIdx: 0,
-        teamIdx: 0,
-      },
-      peers: [],
-    }),
-    [identity],
-  )
-
   if (screen === "console") {
     return (
       <Console
-        teams={teams ?? []}
+        agents={agents}
         onBack={() => {
           window.location.hash = ""
           setScreen("wardrobe")
@@ -104,11 +86,10 @@ export function App() {
     )
   }
 
-  if (screen === "wardrobe" || teams === null) {
+  if (screen === "wardrobe") {
     return (
       <Wardrobe
         identity={identity}
-        loading={teams === null}
         onChange={commit}
         onEnter={() => setScreen("room")}
         onConsole={() => {
@@ -122,16 +103,25 @@ export function App() {
   return (
     <AudioProvider defaultMuted={false}>
       <GameRoom
-        me={menu.me}
-        teams={teams}
-        menu={menu}
+        agents={agents}
+        bulletin={bulletin}
+        hub
+        me={{ id: identity.id, name: identity.name || "Visitor", role: identity.role, spriteId: identity.spriteId }}
+        onReady={setRoom}
+        onAgentInteract={(agent) => {
+          // The host decides what a conversation with an agent is. The demo
+          // has the agent say what it is doing.
+          room?.say(agent.id, agent.activity ? `${agent.name}: ${agent.activity}` : `${agent.name} is ${agent.status}.`)
+        }}
         arcadeUnlocked={identity.arcadeUnlocked}
         onArcadeUnlock={() => commit({ ...identity, arcadeUnlocked: true })}
         onExit={() => setScreen("wardrobe")}
         header={
           <RoomHeader
-            players={buildAllPlayers(teams).length}
-            teams={teams.length}
+            agents={agents}
+            running={running}
+            onToggleRunning={() => setRunning((on) => !on)}
+            onBulletin={raiseBulletin}
             onLeave={() => setScreen("wardrobe")}
           />
         }

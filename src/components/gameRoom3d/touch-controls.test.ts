@@ -11,12 +11,12 @@ import {
 
 const TARGETS: TouchPickTargets = {
   chars: [
-    { playerIdx: 0, x: 0, z: 0 },
-    { playerIdx: 1, x: 10, z: 0 },
+    { selection: { type: "player", idx: 0 }, x: 0, z: 0 },
+    { selection: { type: "player", idx: 1 }, x: 10, z: 0 },
   ],
   tables: [
-    { teamIdx: 0, x: 4, z: 0 },
-    { teamIdx: 1, x: 20, z: 0 },
+    { tableIdx: 0, x: 4, z: 0 },
+    { tableIdx: 1, x: 20, z: 0 },
   ],
 }
 
@@ -27,7 +27,7 @@ describe("touch interact pick", () => {
   })
 
   it("selects the table when it is closer than any character", () => {
-    expect(pickNearestToPoint({ x: 4.5, z: 0 }, TARGETS)).toEqual({ type: "team", idx: 0 })
+    expect(pickNearestToPoint({ x: 4.5, z: 0 }, TARGETS)).toEqual({ type: "desk", idx: 0 })
   })
 
   it("prefers the character on an exact tie, since they are the smaller target", () => {
@@ -37,7 +37,7 @@ describe("touch interact pick", () => {
 
   it("selects nothing when everything is out of reach", () => {
     expect(
-      pickNearestToPoint({ x: 0, z: TOUCH_INTERACT_MAX_DIST + 1 }, { chars: [{ playerIdx: 0, x: 0, z: 0 }], tables: [] }),
+      pickNearestToPoint({ x: 0, z: TOUCH_INTERACT_MAX_DIST + 1 }, { chars: [{ selection: { type: "player", idx: 0 }, x: 0, z: 0 }], tables: [] }),
     ).toBeNull()
     expect(pickNearestToPoint({ x: 0, z: 0 }, { chars: [], tables: [] })).toBeNull()
   })
@@ -45,7 +45,7 @@ describe("touch interact pick", () => {
   it("measures reach as straight-line distance, not per-axis", () => {
     const diagonal = TOUCH_INTERACT_MAX_DIST / Math.SQRT2 + 0.1
     expect(
-      pickNearestToPoint({ x: diagonal, z: diagonal }, { chars: [{ playerIdx: 0, x: 0, z: 0 }], tables: [] }),
+      pickNearestToPoint({ x: diagonal, z: diagonal }, { chars: [{ selection: { type: "player", idx: 0 }, x: 0, z: 0 }], tables: [] }),
     ).toBeNull()
   })
 

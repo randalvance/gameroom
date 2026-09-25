@@ -8,51 +8,35 @@ const createRoomScene = vi.hoisted(() => vi.fn())
 vi.mock("./scene", () => ({ createRoomScene }))
 
 import {
-  consumeRoomArrival,
   nextRoomCameraPan,
   nextRoomCameraZoom,
-  replayRoomArrival,
   Room3DViewport,
   RoomCameraLegend,
+  roomAgentInputs,
   roomCameraWheelAction,
-  room3DSceneIdentityKey,
-  shouldAnimateRoomTeamChange,
+  syncRoomAgents,
 } from "./Room3DViewport"
 import { ROOM_CAMERA_MAX_PAN_SOUTH } from "./camera-pan"
-import type { RoomPlayerInput, RoomSceneHandle } from "./scene"
-import { CUSTOM_SPRITE_ID } from "~/lib/roster"
+import type { RoomAgentInput, RoomSceneHandle } from "./scene"
+import { DEFAULT_STATUS_STYLES, type Agent } from "~/lib/agents"
 
-const SHEET_PREFIX = "data:image/png;base64,"
-
-const player: RoomPlayerInput = {
-  name: "Ada",
-  teamIdx: null,
-  seatIdx: 0,
-  playerIdx: 3,
-  draggable: true,
-}
+const ada: Agent = { id: "ada", name: "Ada", status: "working", activity: "Reading" }
+const bob: Agent = { id: "bob", name: "Bob", status: "idle" }
 
 function createSceneHandle(): RoomSceneHandle {
   return {
     setSelection() {},
-    setTeamRanks() {},
-    setPresentation() {},
-    setWinners() {},
     setQualityPreference() {},
     setCameraPan() {},
     setCameraZoom() {},
-    setPlayerTeam() {},
-    setPlayerBusy() {},
+    upsertAgent: vi.fn(),
+    removeAgent: vi.fn(),
+    say() {},
     setNetStates() {},
-    setWanderStates() {},
     setLocalPlayer() {},
     setLocalInputDisabled: vi.fn(),
-    setLeaderboard() {},
-    setSessionClock() {},
-    setCountdown() {},
-    setMarketNews() {},
-    setNewsAudio() {},
-    setForcedScreenPage() {},
+    setBoard() {},
+    setBulletin() {},
     setMoveInput() {},
     interact() {},
     pickNearCenter: () => null,
@@ -73,7 +57,7 @@ describe("Room3DViewport local input", () => {
   it("reveals and pauses the existing scene without rebuilding it", async () => {
     const handle = { ...createSceneHandle(), setBackroomsUnlocked: vi.fn(), setRenderPaused: vi.fn() }
     createRoomScene.mockResolvedValueOnce(handle)
-    const props = { players: [player], teamLabels: ["TEAM 01"] }
+    const props = { agents: [ada] }
     const view = render(createElement(Room3DViewport, props))
     await waitFor(() => expect(handle.setBackroomsUnlocked).toHaveBeenCalledWith(false))
     view.rerender(createElement(Room3DViewport, { ...props, backroomsUnlocked: true, renderPaused: true }))
@@ -87,7 +71,7 @@ describe("Room3DViewport local input", () => {
   it("shows and hides Primey on the existing scene", async () => {
     const handle = { ...createSceneHandle(), setPrimeyVisible: vi.fn() }
     createRoomScene.mockResolvedValueOnce(handle)
-    const props = { players: [player], teamLabels: ["TEAM 01"] }
+    const props = { agents: [ada] }
     const view = render(createElement(Room3DViewport, { ...props, primeyVisible: false }))
     await waitFor(() => expect(handle.setPrimeyVisible).toHaveBeenCalledWith(false))
     view.rerender(createElement(Room3DViewport, props))
@@ -99,8 +83,7 @@ describe("Room3DViewport local input", () => {
     const handle = createSceneHandle()
     createRoomScene.mockResolvedValueOnce(handle)
     const { rerender } = render(createElement(Room3DViewport, {
-      players: [player],
-      teamLabels: ["TEAM 01"],
+      agents: [ada],
       localInputDisabled: false,
     }))
 
@@ -109,8 +92,7 @@ describe("Room3DViewport local input", () => {
     })
 
     rerender(createElement(Room3DViewport, {
-      players: [player],
-      teamLabels: ["TEAM 01"],
+      agents: [ada],
       localInputDisabled: true,
     }))
 
@@ -119,85 +101,101 @@ describe("Room3DViewport local input", () => {
   })
 })
 
-describe("Room3DViewport team desk categories", () => {
-  it("passes each team's competing status into the room scene", async () => {
-    createRoomScene.mockResolvedValueOnce(createSceneHandle())
+describe("Room3DViewport agents", () => {
+  it("seats the agents through the handle once the scene is up, and never rebuilds for them", async () => {
+    const handle = createSceneHandle()
+    createRoomScene.mockResolvedValueOnce(handle)
+    const { rerender } = render(createElement(Room3DViewport, { agents: [ada] }))
 
-    render(createElement(Room3DViewport, {
-      players: [player],
-      teamLabels: ["TEAM 01", "TEAM 11"],
-      teamCompeting: [true, false],
-    } as never))
+    await waitFor(() => expect(handle.upsertAgent).toHaveBeenCalledTimes(1))
+    expect(handle.upsertAgent).toHaveBeenCalledWith(expect.objectContaining({ id: "ada", status: "working", activity: "Reading" }))
 
-    await waitFor(() => {
-      expect(createRoomScene).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ teamCompeting: [true, false] }),
-      )
-    })
+    // A newcomer goes in; the unchanged one is left alone.
+    rerender(createElement(Room3DViewport, { agents: [ada, bob] }))
+    expect(handle.upsertAgent).toHaveBeenCalledTimes(2)
+    expect(handle.upsertAgent).toHaveBeenLastCalledWith(expect.objectContaining({ id: "bob" }))
+
+    // A change is applied in place.
+    rerender(createElement(Room3DViewport, { agents: [{ ...ada, status: "waiting" }, bob] }))
+    expect(handle.upsertAgent).toHaveBeenCalledTimes(3)
+    expect(handle.upsertAgent).toHaveBeenLastCalledWith(expect.objectContaining({ id: "ada", status: "waiting" }))
+
+    // A departure is a removal.
+    rerender(createElement(Room3DViewport, { agents: [bob] }))
+    expect(handle.removeAgent).toHaveBeenCalledWith("ada")
+    expect(createRoomScene).toHaveBeenCalledTimes(1)
+  })
+
+  it("re-sends everyone when the host's status styles change", async () => {
+    const handle = createSceneHandle()
+    createRoomScene.mockResolvedValueOnce(handle)
+    const { rerender } = render(createElement(Room3DViewport, { agents: [ada, bob] }))
+    await waitFor(() => expect(handle.upsertAgent).toHaveBeenCalledTimes(2))
+
+    rerender(createElement(Room3DViewport, { agents: [ada, bob], statusStyles: { idle: { bubble: "Resting" } } }))
+    // Only bob is idle, so only bob's look changed.
+    expect(handle.upsertAgent).toHaveBeenCalledTimes(3)
+    expect(handle.upsertAgent).toHaveBeenLastCalledWith(expect.objectContaining({ id: "bob", style: expect.objectContaining({ bubble: "Resting" }) }))
   })
 })
 
-describe("Room3DViewport market news", () => {
-  it("updates the live wall screen without rebuilding the scene", async () => {
-    const setMarketNews = vi.fn()
-    const handle = { ...createSceneHandle(), setMarketNews } as RoomSceneHandle & {
-      setMarketNews: typeof setMarketNews
-    }
+describe("roomAgentInputs", () => {
+  it("rolls a working child up to its parent and resolves the look", () => {
+    const parent: Agent = { id: "p", name: "Parent", status: "idle" }
+    const child: Agent = { id: "c", name: "Child", status: "working", parentId: "p" }
+    const inputs = roomAgentInputs([parent, child])
+    expect(inputs[0]).toMatchObject({ id: "p", status: "working", style: DEFAULT_STATUS_STYLES.working, follow: null })
+    expect(inputs[1]).toMatchObject({ id: "c", status: "working", follow: { root: "p", rank: 1 } })
+  })
+})
+
+describe("syncRoomAgents", () => {
+  const input = (over: Partial<RoomAgentInput>): RoomAgentInput => ({
+    id: "a", name: "A", status: "idle", style: DEFAULT_STATUS_STYLES.idle, ...over,
+  })
+
+  it("sends only what changed", () => {
+    const handle = { upsertAgent: vi.fn(), removeAgent: vi.fn() }
+    const first = syncRoomAgents(handle, new Map(), [input({ id: "a" }), input({ id: "b", name: "B" })])
+    expect(handle.upsertAgent).toHaveBeenCalledTimes(2)
+
+    syncRoomAgents(handle, first, [input({ id: "a" }), input({ id: "b", name: "Bee" })])
+    expect(handle.upsertAgent).toHaveBeenCalledTimes(3)
+    expect(handle.upsertAgent).toHaveBeenLastCalledWith(expect.objectContaining({ id: "b", name: "Bee" }))
+    expect(handle.removeAgent).not.toHaveBeenCalled()
+
+    syncRoomAgents(handle, first, [input({ id: "b", name: "B" })])
+    expect(handle.removeAgent).toHaveBeenCalledWith("a")
+  })
+})
+
+describe("Room3DViewport wall", () => {
+  it("raises and lowers a bulletin on the live wall without rebuilding the scene", async () => {
+    const setBulletin = vi.fn()
+    const handle = { ...createSceneHandle(), setBulletin }
     createRoomScene.mockResolvedValueOnce(handle)
-    const bulletin = { message: "Freight routes disrupted", affectedSymbol: "AXON" }
-    const props = {
-      players: [player],
-      teamLabels: ["TEAM 01"],
-      marketNews: bulletin,
-    }
-    const { rerender } = render(createElement(Room3DViewport, props as never))
+    const props = { agents: [], bulletin: "Freight routes disrupted" }
+    const { rerender } = render(createElement(Room3DViewport, props))
 
-    await waitFor(() => expect(setMarketNews).toHaveBeenCalledWith(bulletin))
+    await waitFor(() => expect(setBulletin).toHaveBeenCalledWith("Freight routes disrupted"))
 
-    rerender(createElement(Room3DViewport, { ...props, marketNews: null } as never))
-    expect(setMarketNews).toHaveBeenLastCalledWith(null)
+    rerender(createElement(Room3DViewport, { ...props, bulletin: null }))
+    expect(setBulletin).toHaveBeenLastCalledWith(null)
     expect(createRoomScene).toHaveBeenCalledTimes(1)
   })
 
-  // The doors countdown is the room's wall before the event; a moved opening
-  // time reaches the screen as a retarget, not a rebuild.
-  it("retargets the wall's countdown without rebuilding the scene", async () => {
-    const setCountdown = vi.fn()
-    const handle = { ...createSceneHandle(), setCountdown } as RoomSceneHandle & {
-      setCountdown: typeof setCountdown
-    }
+  it("repaints the board without rebuilding the scene", async () => {
+    const setBoard = vi.fn()
+    const handle = { ...createSceneHandle(), setBoard }
     createRoomScene.mockResolvedValueOnce(handle)
-    const doors = { atMs: 1_789_689_600_000, title: "DOORS OPEN" }
-    const props = { players: [player], teamLabels: ["TEAM 01"], countdown: doors }
-    const { rerender } = render(createElement(Room3DViewport, props as never))
+    const board = { title: "AGENTS", lines: ["3 working", "1 waiting"] }
+    const props = { agents: [], board }
+    const { rerender } = render(createElement(Room3DViewport, props))
 
-    await waitFor(() => expect(setCountdown).toHaveBeenCalledWith(doors))
+    await waitFor(() => expect(setBoard).toHaveBeenCalledWith(board))
 
-    rerender(createElement(Room3DViewport, { ...props, countdown: null } as never))
-    expect(setCountdown).toHaveBeenLastCalledWith(null)
-    expect(createRoomScene).toHaveBeenCalledTimes(1)
-  })
-
-  // The gamemaster's console pins the wall for the whole room; releasing hands
-  // it back to the players' own interact presses.
-  it("pins and releases the wall screen without rebuilding the scene", async () => {
-    const setForcedScreenPage = vi.fn()
-    const handle = { ...createSceneHandle(), setForcedScreenPage } as RoomSceneHandle & {
-      setForcedScreenPage: typeof setForcedScreenPage
-    }
-    createRoomScene.mockResolvedValueOnce(handle)
-    const props = {
-      players: [player],
-      teamLabels: ["TEAM 01"],
-      forcedScreenPage: "leaderboard",
-    }
-    const { rerender } = render(createElement(Room3DViewport, props as never))
-
-    await waitFor(() => expect(setForcedScreenPage).toHaveBeenCalledWith("leaderboard"))
-
-    rerender(createElement(Room3DViewport, { ...props, forcedScreenPage: null } as never))
-    expect(setForcedScreenPage).toHaveBeenLastCalledWith(null)
+    rerender(createElement(Room3DViewport, { ...props, board: null }))
+    expect(setBoard).toHaveBeenLastCalledWith(null)
     expect(createRoomScene).toHaveBeenCalledTimes(1)
   })
 })
@@ -208,8 +206,7 @@ describe("Room3DViewport interact wiring", () => {
     const first = vi.fn()
     const second = vi.fn()
     const { rerender } = render(createElement(Room3DViewport, {
-      players: [player],
-      teamLabels: ["TEAM 01"],
+      agents: [],
       onPrimeyInteract: first,
     }))
 
@@ -219,8 +216,7 @@ describe("Room3DViewport interact wiring", () => {
     // A re-render must not orphan the handler behind a stale closure: the
     // scene is built once and keeps whatever function it was handed.
     rerender(createElement(Room3DViewport, {
-      players: [player],
-      teamLabels: ["TEAM 01"],
+      agents: [],
       onPrimeyInteract: second,
     }))
 
@@ -229,9 +225,19 @@ describe("Room3DViewport interact wiring", () => {
     expect(second).toHaveBeenCalledTimes(1)
     expect(createRoomScene).toHaveBeenCalledTimes(1)
   })
+
+  it("forwards an agent's interact to the latest callback", async () => {
+    createRoomScene.mockResolvedValueOnce(createSceneHandle())
+    const onAgentInteract = vi.fn()
+    render(createElement(Room3DViewport, { agents: [ada], onAgentInteract }))
+    await waitFor(() => expect(createRoomScene).toHaveBeenCalledTimes(1))
+    const opts = createRoomScene.mock.calls[0]![1] as { onAgentInteract: (id: string) => void }
+    opts.onAgentInteract("ada")
+    expect(onAgentInteract).toHaveBeenCalledWith("ada")
+  })
 })
 
-describe("room3DSceneIdentityKey", () => {
+describe("camera controls", () => {
   it("shows camera shortcuts as a legend without interactive buttons", () => {
     render(RoomCameraLegend())
 
@@ -282,188 +288,5 @@ describe("room3DSceneIdentityKey", () => {
     // standing at the last row of desks.
     expect(nextRoomCameraPan({ x: 0, z: south }, "down")).toEqual({ x: 0, z: south })
     expect(nextRoomCameraPan({ x: 9, z: -6 }, "center")).toEqual({ x: 0, z: 0 })
-  })
-
-  it("rebuilds for seat changes but not synchronized team changes", () => {
-    const initial = room3DSceneIdentityKey({
-      interactionMode: "assign",
-      teamLabels: ["TEAM 01"],
-      players: [player],
-    })
-
-    expect(room3DSceneIdentityKey({
-      interactionMode: "assign",
-      teamLabels: ["TEAM 01"],
-      players: [{ ...player, teamIdx: 0 }],
-    })).toBe(initial)
-    expect(room3DSceneIdentityKey({
-      interactionMode: "assign",
-      teamLabels: ["TEAM 01"],
-      players: [{ ...player, seatIdx: 1 }],
-    })).not.toBe(initial)
-  })
-
-  it("rebuilds when a team's competing status changes", () => {
-    const competingRoster = {
-      interactionMode: "select" as const,
-      teamLabels: ["TEAM 11"],
-      teamCompeting: [true],
-      players: [player],
-    }
-    const exhibition = { ...competingRoster, teamCompeting: [false] }
-
-    expect(room3DSceneIdentityKey(exhibition)).not.toBe(room3DSceneIdentityKey(competingRoster))
-  })
-
-  // Standings move every ten seconds while a window is open. Rebuilding the
-  // scene for one would drop the camera, the walk and everyone's position ten
-  // times a minute, which is why the placings go through the handle
-  // (setTeamRanks) and stay out of the identity key entirely.
-  it("never rebuilds for a change in the standings", () => {
-    const identity = {
-      interactionMode: "select" as const,
-      teamLabels: ["TEAM 01"],
-      players: [player],
-    }
-    // The key takes no rank input at all — the type is the guard, and this
-    // asserts nobody has quietly widened it.
-    expect(room3DSceneIdentityKey({ ...identity, teamRanks: [1] } as typeof identity))
-      .toBe(room3DSceneIdentityKey({ ...identity, teamRanks: [7] } as typeof identity))
-  })
-
-  // The scene draws each character from its sheet at BUILD time and has no
-  // handle for swapping one afterwards, so a sprite that changed under a
-  // mounted room only lands if the identity key rebuilds the scene. Leaving it
-  // out is what kept the game room on a student's OLD character until the
-  // server was restarted.
-  it("rebuilds when a player's character changes", () => {
-    const initial = room3DSceneIdentityKey({
-      interactionMode: "select",
-      teamLabels: ["TEAM 01"],
-      players: [{ ...player, spriteId: 4 }],
-    })
-
-    expect(room3DSceneIdentityKey({
-      interactionMode: "select",
-      teamLabels: ["TEAM 01"],
-      players: [{ ...player, spriteId: 5 }],
-    })).not.toBe(initial)
-  })
-
-  it("rebuilds when a generated sheet is replaced under the same sprite id", () => {
-    const key = (sheet: string) => room3DSceneIdentityKey({
-      interactionMode: "select",
-      teamLabels: ["TEAM 01"],
-      players: [{ ...player, spriteId: CUSTOM_SPRITE_ID, spriteSheet: sheet }],
-    })
-
-    expect(key(`${SHEET_PREFIX}AAAA`)).not.toBe(key(`${SHEET_PREFIX}BBBB`))
-  })
-
-  // A sheet is a base64 PNG data URL — tens of kilobytes per player, and the
-  // key is serialized on every render. It carries a digest of the sheet, not
-  // the sheet.
-  it("keeps the key small when players carry generated sheets", () => {
-    const key = room3DSceneIdentityKey({
-      interactionMode: "select",
-      teamLabels: ["TEAM 01"],
-      players: [{ ...player, spriteId: CUSTOM_SPRITE_ID, spriteSheet: `${SHEET_PREFIX}${"A".repeat(40_000)}` }],
-    })
-
-    expect(key.length).toBeLessThan(500)
-  })
-
-  it("defers arrival animation while optimistic assignment is busy", () => {
-    expect(shouldAnimateRoomTeamChange(null, 0, true)).toBe(false)
-    expect(shouldAnimateRoomTeamChange(null, 0, false)).toBe(true)
-    expect(shouldAnimateRoomTeamChange(1, 0, false)).toBe(false)
-  })
-
-  it("replays a confirmed arrival from the lobby to its authoritative table", () => {
-    const calls: Array<[number, number | null, boolean?]> = []
-    const handle: RoomSceneHandle = {
-      setSelection() {},
-      setTeamRanks() {},
-    setPresentation() {},
-    setWinners() {},
-      setCameraPan() {},
-      setCameraZoom() {},
-      setPlayerTeam: (...args) => calls.push(args),
-      setPlayerBusy() {},
-      setQualityPreference() {},
-      setNetStates() {},
-      setWanderStates() {},
-      setSessionClock() {},
-    setCountdown() {},
-      setMarketNews() {},
-      setNewsAudio() {},
-      setForcedScreenPage() {},
-      setLocalPlayer() {},
-      setLocalInputDisabled() {},
-      setMoveInput() {},
-      interact() {},
-      pickNearCenter: () => null,
-      showSpeech() {},
-      upsertGuest() {},
-      removeGuest() {},
-      freezeLocalInput() {},
-      showObjectSpeech() {},
-      setLeaderboard() {},
-      dispose() {},
-    }
-
-    replayRoomArrival(handle, [{ ...player, teamIdx: 1 }], { playerIdx: 3, sequence: 4 })
-
-    expect(calls).toEqual([
-      [3, null, false],
-      [3, 1, true],
-    ])
-  })
-
-  it("consumes each confirmed arrival sequence only once across later player updates", () => {
-    const calls: Array<[number, number | null, boolean?]> = []
-    const handle: RoomSceneHandle = {
-      setSelection() {},
-      setTeamRanks() {},
-    setPresentation() {},
-    setWinners() {},
-      setCameraPan() {},
-      setCameraZoom() {},
-      setPlayerTeam: (...args) => calls.push(args),
-      setPlayerBusy() {},
-      setQualityPreference() {},
-      setNetStates() {},
-      setWanderStates() {},
-      setSessionClock() {},
-    setCountdown() {},
-      setMarketNews() {},
-      setNewsAudio() {},
-      setForcedScreenPage() {},
-      setLocalPlayer() {},
-      setLocalInputDisabled() {},
-      setMoveInput() {},
-      interact() {},
-      pickNearCenter: () => null,
-      showSpeech() {},
-      upsertGuest() {},
-      removeGuest() {},
-      freezeLocalInput() {},
-      showObjectSpeech() {},
-      setLeaderboard() {},
-      dispose() {},
-    }
-    const animation = { playerIdx: 3, sequence: 4 }
-
-    const consumed = consumeRoomArrival(handle, [{ ...player, teamIdx: 1 }], animation, null)
-    const stillConsumed = consumeRoomArrival(
-      handle,
-      [{ ...player, teamIdx: 1, seatIdx: 9 }],
-      animation,
-      consumed,
-    )
-
-    expect(consumed).toBe(4)
-    expect(stillConsumed).toBe(4)
-    expect(calls).toHaveLength(2)
   })
 })

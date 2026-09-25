@@ -7,7 +7,7 @@
 // identity anyone can follow across the two screens.
 //
 // The assignment is FIXED to the team's code, never to its position. Colouring
-// by rank would repaint the whole room every time the standings moved, which
+// by rank would repaint the whole room every time a ranking moved, which
 // is the one thing a team colour must not do.
 
 // The first ten were validated with the dataviz palette checker against the

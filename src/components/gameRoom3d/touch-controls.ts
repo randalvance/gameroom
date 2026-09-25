@@ -8,7 +8,7 @@
 // logic lives here, apart from the scene, so it can be tested without
 // three.js.
 
-import type { RoomSelection } from "../gameRoom/InfoPanel"
+import type { RoomSelection } from "./selection"
 
 /** Cadence of a held D-pad button while panning. One press = one ROOM_CAMERA_PAN_STEP. */
 export const TOUCH_PAN_REPEAT_MS = 120
@@ -43,8 +43,8 @@ export function pinchZoom(
 }
 
 export interface TouchPickTargets {
-  chars: { playerIdx: number; x: number; z: number }[]
-  tables: { teamIdx: number; x: number; z: number }[]
+  chars: { selection: RoomSelection; x: number; z: number }[]
+  tables: { tableIdx: number; x: number; z: number }[]
 }
 
 /**
@@ -63,14 +63,14 @@ export function pickNearestToPoint(
   for (const table of targets.tables) {
     const dist = Math.hypot(table.x - point.x, table.z - point.z)
     if (dist <= bestDist) {
-      best = { type: "team", idx: table.teamIdx }
+      best = { type: "desk", idx: table.tableIdx }
       bestDist = dist
     }
   }
   for (const char of targets.chars) {
     const dist = Math.hypot(char.x - point.x, char.z - point.z)
     if (dist <= bestDist) {
-      best = { type: "player", idx: char.playerIdx }
+      best = char.selection
       bestDist = dist
     }
   }

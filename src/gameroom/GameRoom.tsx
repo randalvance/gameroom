@@ -1,19 +1,20 @@
 // The game room, as ONE component you can drop into a page.
 //
-// Everything below the header of the event site's /game-room route lives here:
-// the 3D room, the multiplayer wiring, the pause menu, the chat panel, the
-// dialog box, the music, and the three easter-egg games that open over it.
-// A host hands in who is playing and which teams are seated; the room does the
-// rest and calls back when something outside its walls has to happen (a save,
-// an exit).
+// The 3D room, the multiplayer wiring for the humans in it, the pause menu,
+// the chat panel, the dialog box, the music, and the three easter-egg games
+// that open over it. A host hands in its agents and, optionally, who is
+// visiting; the room does the rest and calls back when something outside its
+// walls has to happen (a conversation with an agent, a save, an exit).
 //
 // What it deliberately does NOT own:
 //
 //   - identity. There is no sign-in here. `me` is whoever you say it is.
+//   - a server. Other people need the hub (`hub`); the agents, the plants
+//     and the games do not.
 //   - persistence. Unlocking the arcade fires `onArcadeUnlock`; keeping that
 //     across visits is the host's business (`arcadeUnlocked` hands it back).
-//   - the roster. Teams come in as props, and the hub is told about them
-//     server-side (see server/hub-server.ts).
+//   - what agents ARE. They arrive as a list with statuses; what one says
+//     when you walk up and press E is the host's answer to onAgentInteract.
 //
 // Use <GameRoom3D> directly instead if you want only the scene, with your own
 // UI around it.
@@ -24,56 +25,78 @@ import { BackroomsPortal } from "~/components/backrooms/BackroomsPortal"
 import { ArcadePortal } from "~/components/arcade/ArcadePortal"
 import { DuelPortal } from "~/components/duel/DuelPortal"
 import type { DeckId } from "~/components/duel/cards"
-import { exhibitionOrdinal, houseDeckForDesk } from "~/components/duel/house-deck"
+import { houseDeckForDesk, houseDeskOrdinal, houseNameForDesk } from "~/components/duel/house-deck"
 import { RoomToast } from "~/components/RoomToast"
-import { StudentSelector } from "~/components/StudentSelector"
-import { tableInteractAction } from "~/lib/table-interact-action"
+import { AgentFinder } from "~/components/AgentFinder"
+import { deskInteractAction } from "~/lib/table-interact-action"
+import { HOUSE_TABLE_IDXS } from "~/components/gameRoom/constants"
 import { createRoomArcadeCues, type RoomArcadeCues } from "~/components/arcade/room-cues"
 import { RotateToLandscape, useCoarsePointer, useIsPortrait } from "~/components/gameRoom3d/TouchControls"
 import { useGameRoomNet } from "~/components/gameRoom3d/useGameRoomNet"
-import { useMarketNews } from "~/components/gameRoom3d/useMarketNews"
-import { useMarketNewsPrewarm } from "~/components/gameRoom3d/useMarketNewsPrewarm"
-import { useAnnouncementVoice } from "~/components/gameRoom3d/useAnnouncementVoice"
-import { useSessionClock } from "~/components/gameRoom3d/useSessionClock"
-import { useDoors } from "~/components/gameRoom3d/useDoors"
-import { EVENT_OVER_SCREEN, doorsCountdown } from "~/components/gameRoom3d/session-screen"
+import { useBulletin, type RoomBulletin } from "~/components/gameRoom3d/useBulletin"
+import type { RoomBoard } from "~/components/gameRoom3d/wall"
 import { GameRoomChatPanel } from "~/components/gameRoom3d/GameRoomChatPanel"
 import { GameRoomDialogBox } from "~/components/gameRoom3d/GameRoomDialogBox"
 import type { GameRoomDialog } from "~/components/gameRoom3d/useGameRoomNet"
 import { GameRoomMenu } from "~/components/gameRoom3d/GameRoomMenu"
-import { PresentationBanner } from "~/components/gameRoom3d/PresentationBanner"
-import { WinnersBanner } from "~/components/gameRoom3d/WinnersBanner"
 import type { RoomSceneHandle } from "~/components/gameRoom3d/scene"
+import type { RoomSelection } from "~/components/gameRoom3d/selection"
 import { usePageMusic, useSiteAudio } from "~/components/SiteAudio"
 import { roomMusicRequest } from "~/lib/game-room-music"
 import { createKonamiDetector, konamiTokenForKey } from "~/lib/konami"
 import { track } from "~/lib/analytics"
-import { buildAllPlayers, type TeamDTO } from "~/lib/event-types"
-import type { ExLeaderboardRow } from "~/lib/exchange-types"
+import { agentBoardSummary, type Agent, type StatusStyleOverrides } from "~/lib/agents"
+import type { Role } from "~/lib/auth"
 import { useSnapMic } from "~/components/gameRoom3d/useSnapMic"
-import type { GameRoomMenuData } from "~/lib/game-room-menu"
-import { getExLeaderboardFn } from "~/server/exchange"
-import { openDoors, type StudentAccessView } from "~/server/student-access"
+import type { GameRoomMenuData, GameRoomMenuPerson } from "~/lib/game-room-menu"
 
 /** How long Primey's line stays up when you press interact on it. */
 const PRIMEY_DIALOG_MS = 4200
 
-/** How often the wall screen's standings are refreshed. */
-const LEADERBOARD_POLL_MS = 15_000
+/** A person in the room: whoever is walking a character. */
+export interface Visitor {
+  id: string
+  name: string
+  /** Decides the ring under their feet and whether the gamemaster's music
+   * command reaches their speakers. Visitors' laptops keep the playlist. */
+  role?: Role
+  /** A stock sheet index, or null for one derived from their seat. */
+  spriteId?: number | null
+  /** A generated sheet (PNG data URL) drawn instead of the stock pool. */
+  spriteSheet?: string | null
+}
+
+/** What a host can do to the room while it runs. */
+export interface GameRoomHandle {
+  /** A speech bubble over an agent, for `ms` (four seconds when absent). */
+  say(agentId: string, text: string, ms?: number): void
+}
 
 export interface GameRoomProps {
-  /** Who is playing. `role` decides crowns, PA music and what the menu offers. */
-  me: GameRoomMenuData["me"]
-  /** The desks, in seating order. */
-  teams: TeamDTO[]
-  /** What the pause menu shows: you, and the people it lists beside you. */
-  menu: GameRoomMenuData
+  /** The agents in the room. Hand in a new array whenever anything changes. */
+  agents: readonly Agent[]
+  /** Who is watching. Omit for a spectator with no character to walk. */
+  me?: Visitor
+  /** How each status looks, laid over the room's defaults. */
+  statusStyles?: StatusStyleOverrides
   /**
-   * When the room opens. Before it the room is a WAITING room: the wall counts
-   * down, the desks carry no placings and the price strip is off. Omit for a
-   * room that is simply open.
+   * The wall's resting page. Omit for the room's own summary of the agents;
+   * null for the room's title alone.
    */
-  doors?: StudentAccessView
+  board?: RoomBoard | null
+  /** A bulletin for the wall: it goes up for its hold, and every camera in
+   * the room turns to read it. Hand in a new object to raise it again. */
+  bulletin?: RoomBulletin | null
+  /** Walking up to an agent and pressing interact. What the agent says back
+   * is the host's: answer through the handle's `say`. */
+  onAgentInteract?: (agent: Agent) => void
+  /** An agent was clicked (or tapped, or found), or the selection cleared. */
+  onAgentSelect?: (agent: Agent | null) => void
+  /** The room is live: everything the host can do to it while it runs. */
+  onReady?: (handle: GameRoomHandle | null) => void
+  /** Walking up to Primey and pressing interact. Omit and Primey says hello
+   * through the room's own dialog box. */
+  onPrimeyInteract?: () => void
   /** The arcade cabinet was unlocked on an earlier visit: it is already there,
    * with no drop-in entrance. */
   arcadeUnlocked?: boolean
@@ -87,88 +110,99 @@ export interface GameRoomProps {
   /** Rendered above the room — your own header, ticker or nothing at all. */
   header?: React.ReactNode
   /**
-   * Listen to an exchange price feed (`/api/prices/stream`) for scripted market
-   * announcements, which take over the wall screen. Off by default: nothing in
-   * this library serves that feed, and a room with no exchange behind it
-   * should not sit holding a dead EventSource open.
+   * Connect to the visitors' hub (`server/hub-server.ts`, or your own
+   * service speaking the same routes; `configureGameRoomApi` says where).
+   * Off by default: the room is single-player, and needs no server at all.
    */
-  marketFeed?: boolean
+  hub?: boolean
+}
+
+const SPECTATOR: Visitor = { id: "spectator", name: "Spectator", role: "visitor" }
+
+function menuPersonFor(me: Visitor): GameRoomMenuPerson {
+  return {
+    id: me.id,
+    name: me.name,
+    role: me.role ?? "visitor",
+    spriteId: me.spriteId ?? null,
+    spriteSheet: me.spriteSheet ?? null,
+    playerIdx: 0,
+    teamIdx: 0,
+  }
 }
 
 export function GameRoom({
+  agents,
   me,
-  teams,
-  menu,
-  doors: initialDoors,
+  statusStyles,
+  board,
+  bulletin = null,
+  onAgentInteract,
+  onAgentSelect,
+  onReady,
+  onPrimeyInteract,
   arcadeUnlocked = false,
   onArcadeUnlock,
   onDuelWin,
   onExit,
   header,
-  marketFeed = false,
+  hub = false,
 }: GameRoomProps) {
   const { playSfx, suspendMusic, effectsVolume, musicMuted, musicVolume } = useSiteAudio()
-  // Before the doors open the room is a waiting room: the wall counts to the
-  // doors, the desks carry no placings, the strip is off.
-  const doors = useDoors(useMemo(() => initialDoors ?? openDoors(), [initialDoors]))
-  const preEvent = doors.preEvent
-
-  // The screen that plays filmed clips and speaks announcements: the big screen
-  // or the laptop driving the projector and the PA. Only that screen warms the
-  // clips.
-  const playsClips = me.role === "admin" || me.role === "viewer"
-  useMarketNewsPrewarm(playsClips)
-  const allPlayers = useMemo(() => buildAllPlayers(teams), [teams])
+  const visitor = me ?? SPECTATOR
+  const menu = useMemo<GameRoomMenuData>(() => ({ me: menuPersonFor(visitor) }), [visitor])
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [inBackrooms, setInBackrooms] = useState(false)
   // Only this account's unlock is held. Discovery is immediate; saving it is
   // the host's job, and a failed save costs the cabinet on the next visit only.
   const [arcadeUnlock, setArcadeUnlock] = useState<{ userId: string; saveFailed?: boolean } | null>(null)
-  const arcadeVisible = arcadeUnlocked || arcadeUnlock?.userId === me.id
+  const arcadeVisible = arcadeUnlocked || arcadeUnlock?.userId === visitor.id
   const arcadeVisibleRef = useRef(arcadeVisible)
   arcadeVisibleRef.current = arcadeVisible
   const [inArcade, setInArcade] = useState(false)
   const [arcadeToast, setArcadeToast] = useState(false)
-  useEffect(() => { setInArcade(false); setArcadeToast(false) }, [me.id])
-  // The white desks' card duel: an easter egg with no signpost. Interact at an
-  // exhibition desk opens the game over the room, local to this client.
+  useEffect(() => { setInArcade(false); setArcadeToast(false) }, [visitor.id])
+  // The white desks' card duel: an easter egg with no signpost. Interact at a
+  // house desk opens the game over the room, local to this client.
   const [duel, setDuel] = useState<{ houseDeck: DeckId; houseName: string } | null>(null)
   const inDuel = duel !== null
-  useEffect(() => { setDuel(null) }, [me.id])
+  useEffect(() => { setDuel(null) }, [visitor.id])
   /** The room's two arcade cues (the unlock jingle, the cabinet's thud). */
   const jingleRef = useRef<RoomArcadeCues | null>(null)
   useEffect(() => () => { jingleRef.current?.close(); jingleRef.current = null }, [])
 
-  // The desk the player walked up to. Null means the Team section shows their
-  // own team, which is what opening the menu by hand does.
-  const [focusTeamIdx, setFocusTeamIdx] = useState<number | null>(null)
-  const [selectedPlayerIdx, setSelectedPlayerIdx] = useState<number | null>(null)
+  const [selected, setSelected] = useState<RoomSelection>(null)
+  const agentsRef = useRef(agents)
+  agentsRef.current = agents
+  const onAgentSelectRef = useRef(onAgentSelect)
+  onAgentSelectRef.current = onAgentSelect
+  const select = useCallback((next: RoomSelection) => {
+    setSelected(next)
+    const agent = next?.type === "agent" ? agentsRef.current.find((candidate) => candidate.id === next.id) ?? null : null
+    onAgentSelectRef.current?.(agent)
+  }, [])
   // The scene handle, kept alongside the network hook's own use of it, so the
-  // menu's GRAPHICS row can retune the room running behind it.
+  // menu's GRAPHICS row can retune the room running behind it and the host
+  // can put words in an agent's mouth.
   const sceneRef = useRef<RoomSceneHandle | null>(null)
-  const net = useGameRoomNet(allPlayers)
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
+  const net = useGameRoomNet({ hub, me: me ?? null })
   // The room's alternating playlist — unless the gamemaster has put one track
-  // on, or stopped the music, and this is a PA screen (admin or viewer).
-  usePageMusic(roomMusicRequest(net.music, me.role))
-  const marketNews = useMarketNews(() => playSfx("news"), net.bulletin, playsClips, marketFeed)
-  // A filmed broadcast has a presenter talking over the whole clip, so the
-  // room's playlist STOPS for it and starts again when the wall clears. The
-  // three overlay games each bring their own soundtrack, so it stops for those
-  // too.
-  const broadcasting = marketNews?.clip != null
+  // on, or stopped the music, and this is a PA screen (a host or a screen).
+  usePageMusic(roomMusicRequest(net.music, visitor.role ?? "visitor"))
+  // The wall's bulletin, from the host's prop or the gamemaster's console.
+  const bulletinText = useBulletin(bulletin, net.bulletin, () => playSfx("news"))
+  // The wall's resting page: the host's, or the room's own count of the agents.
+  const wallBoard = useMemo(() => (board === undefined ? agentBoardSummary(agents) : board), [board, agents])
+  // The three overlay games each bring their own soundtrack, so the room's
+  // playlist stops for them.
   useEffect(() => {
-    if (!broadcasting && !inBackrooms && !inArcade && !inDuel) return
+    if (!inBackrooms && !inArcade && !inDuel) return
     suspendMusic(true)
     return () => suspendMusic(false)
-  }, [broadcasting, inBackrooms, inArcade, inDuel, suspendMusic])
-  // A broadcast and a spoken announcement are the room's PA, not the game's
-  // sound, and NEITHER mute toggle silences them: the machine this matters on
-  // is a projector laptop nobody is sitting at, where a mute left over from
-  // setup is exactly the accident that costs the room an announcement.
-  const newsAudio = useMemo(() => ({ muted: false, volume: effectsVolume }), [effectsVolume])
-  useAnnouncementVoice(net.bulletin, playsClips, newsAudio)
-  const sessionClock = useSessionClock()
+  }, [inBackrooms, inArcade, inDuel, suspendMusic])
 
   const controlling = net.myPlayerIdx !== null
   /** A mini-game is up over the room: input, rendering and the menu stand down. */
@@ -190,31 +224,30 @@ export function GameRoom({
   }, [])
   useEffect(() => () => { if (localTimer.current) clearTimeout(localTimer.current) }, [])
 
-  const teamCompeting = useMemo(() => teams.map((team) => team.competing ?? true), [teams])
   const openDuel = useCallback((tableIdx: number) => {
     if (overlayGame || net.dialog) return
-    const ordinal = exhibitionOrdinal(teamCompeting, tableIdx)
+    const ordinal = houseDeskOrdinal(HOUSE_TABLE_IDXS, tableIdx)
     if (ordinal < 0) return
     setMenuOpen(false)
     // The challenge begins at the interact press — the toast on the walk-up is
     // an invitation, and is not counted.
     const houseDeck = houseDeckForDesk(ordinal)
     track("easter_egg.duel_opened", { house: houseDeck })
-    setDuel({ houseDeck, houseName: teams[tableIdx]?.name ?? "The house" })
-  }, [overlayGame, net.dialog, teamCompeting, teams])
+    setDuel({ houseDeck, houseName: houseNameForDesk(ordinal) })
+  }, [overlayGame, net.dialog])
 
   const revealArcade = useCallback(() => {
     if (!jingleRef.current) jingleRef.current = createRoomArcadeCues(effectsVolume)
     jingleRef.current.setVolume(effectsVolume)
     jingleRef.current.unlock()
-    const userId = me.id
+    const userId = visitor.id
     track("easter_egg.arcade_unlocked", { already_unlocked: arcadeVisibleRef.current })
     setArcadeUnlock({ userId })
     void Promise.resolve(onArcadeUnlock?.()).catch(() => {
       setArcadeUnlock((current) => (current?.userId === userId ? { userId, saveFailed: true } : current))
     })
     setArcadeToast(true)
-  }, [effectsVolume, me.id, onArcadeUnlock])
+  }, [effectsVolume, visitor.id, onArcadeUnlock])
   const revealArcadeRef = useRef(revealArcade)
   revealArcadeRef.current = revealArcade
 
@@ -232,7 +265,7 @@ export function GameRoom({
   // One detector for both spellings: the keyboard feeds it arrows and letters
   // below, the touch pad feeds it D-pad presses and the A button.
   const konami = useMemo(() => createKonamiDetector(() => revealArcadeRef.current()), [])
-  useEffect(() => { konami.reset() }, [konami, me.id])
+  useEffect(() => { konami.reset() }, [konami, visitor.id])
   useEffect(() => {
     if (!arcadeToast) return
     const id = window.setTimeout(() => setArcadeToast(false), 5000)
@@ -240,27 +273,9 @@ export function GameRoom({
   }, [arcadeToast])
 
   // Touch-first devices get the on-screen game-pad; keyboard hints only confuse
-  // there, and the find-student box needs the full narrow width.
+  // there, and the find box needs the full narrow width.
   const coarsePointer = useCoarsePointer()
   const portrait = useIsPortrait()
-
-  const selectedTeamIdx =
-    selectedPlayerIdx !== null ? allPlayers[selectedPlayerIdx]?.teamIdx ?? null : null
-
-  // Standings for the wall screen. The screen is a page a player turns to, so
-  // this polls whether or not anyone is looking — the alternative is a blank
-  // board for the first fifteen seconds after every press.
-  const [leaderboard, setLeaderboard] = useState<readonly ExLeaderboardRow[]>([])
-  useEffect(() => {
-    let alive = true
-    const load = async () => {
-      const rows = await getExLeaderboardFn()
-      if (alive) setLeaderboard(rows)
-    }
-    void load()
-    const id = setInterval(() => { void load() }, LEADERBOARD_POLL_MS)
-    return () => { alive = false; clearInterval(id) }
-  }, [])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -283,12 +298,12 @@ export function GameRoom({
       }
       if (e.key === "c" || e.key === "C") {
         e.preventDefault()
-        setSelectedPlayerIdx(null)
+        select(null)
       }
     }
     window.addEventListener("keydown", handler)
     return () => window.removeEventListener("keydown", handler)
-  }, [controlling, menuOpen, overlayGame, onExit, konami])
+  }, [controlling, menuOpen, overlayGame, onExit, konami, select])
 
   // dvh, not vh: on phones the URL bar overlaps the bottom of a 100vh page,
   // which is exactly where the touch controls sit.
@@ -308,30 +323,20 @@ export function GameRoom({
       >
         {header}
 
-        {/* The room owns every pixel below the header; the find-student control
-            and the hint float above the canvas instead of framing it. */}
+        {/* The room owns every pixel below the header; the find box and the
+            hint float above the canvas instead of framing it. */}
         <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
           <GameRoom3D
             fill
-            teams={teams}
-            allPlayers={allPlayers}
-            selectedTeamIdx={selectedTeamIdx}
-            selectedPlayerIdx={selectedPlayerIdx}
-            // A waiting room has no standings and no trading clock: the desks
-            // stay bare and the wall holds the doors countdown alone.
-            leaderboard={preEvent ? [] : leaderboard}
-            sessionClock={preEvent ? null : sessionClock}
-            countdown={preEvent ? (doors.over ? EVENT_OVER_SCREEN : doorsCountdown(doors.opensAtMs)) : null}
-            marketNews={marketNews}
-            newsAudio={newsAudio}
-            forcedScreenPage={net.forcedScreenPage}
-            presentation={net.presentation}
-            winners={net.winners}
-            onPlayerSelect={setSelectedPlayerIdx}
+            agents={agents}
+            statusStyles={statusStyles}
+            selected={selected}
+            board={wallBoard}
+            bulletin={bulletinText}
+            onSelect={select}
             localControlActive={controlling}
             localInputDisabled={menuOpen || overlayGame}
             backroomsUnlocked={net.backroomsUnlocked}
-            primeyVisible={!(preEvent && me.role === "student")}
             arcadeVisible={arcadeVisible}
             thanosSnapSeq={thanosSnapSeq}
             // Unlocked on an earlier visit: the cabinet is already there, no drop-in.
@@ -357,24 +362,30 @@ export function GameRoom({
             onSceneReady={(handle) => {
               sceneRef.current = handle
               net.onSceneReady(handle)
+              onReadyRef.current?.(handle ? { say: (agentId, text, ms) => handle.say(agentId, text, ms) } : null)
             }}
             onSelfState={net.onSelfState}
             onInteract={net.onInteract}
+            onAgentInteract={(agentId) => {
+              const agent = agentsRef.current.find((candidate) => candidate.id === agentId)
+              if (!agent || overlayGame || net.dialog) return
+              onAgentInteract?.(agent)
+            }}
             onTableInteract={(tableIdx) => {
               // A white desk deals you in — unannounced, it is an easter egg;
-              // the exhibition team's menu entry is still a menu key away.
-              if (tableInteractAction(teams, tableIdx) === "duel") {
+              // every other desk opens the agents list.
+              if (deskInteractAction(tableIdx) === "duel") {
                 openDuel(tableIdx)
                 return
               }
-              setFocusTeamIdx(tableIdx)
               setMenuOpen(true)
             }}
             onPrimeyInteract={() => {
-              // The site this came from opened an LLM chat panel here. The
-              // library ships no model, so Primey says hello through the room's
-              // own dialog box and a host that has one opens it from here.
-              say("PRIMEY", "Hey! Walk up to a desk and press E to meet a team.", PRIMEY_DIALOG_MS)
+              if (onPrimeyInteract) {
+                onPrimeyInteract()
+                return
+              }
+              say("PRIMEY", "Hey! Walk up to an agent and press E to see what it is up to.", PRIMEY_DIALOG_MS)
             }}
             onMenuToggle={!coarsePointer ? () => setMenuOpen((open) => !open) : undefined}
           />
@@ -382,17 +393,12 @@ export function GameRoom({
           {!overlayGame && (
             <GameRoomMenu
               data={menu}
+              agents={agents}
+              statusStyles={statusStyles}
               open={menuOpen}
-              onOpenChange={(open) => {
-                setMenuOpen(open)
-                // Closing releases the desk, so opening the menu by hand next
-                // time is about your own team again.
-                if (!open) setFocusTeamIdx(null)
-              }}
+              onOpenChange={setMenuOpen}
               showTrigger={coarsePointer}
               touchControlsVisible={coarsePointer}
-              teams={teams}
-              focusTeamIdx={focusTeamIdx}
               onGraphicsChange={(preference) => sceneRef.current?.setQualityPreference?.(preference)}
             />
           )}
@@ -405,8 +411,8 @@ export function GameRoom({
                 top: 10,
                 left: 10,
                 zIndex: 11,
-                // Leave the find-student box its top-right corner: the hint
-                // wraps rather than sliding underneath it on a narrow phone.
+                // Leave the find box its top-right corner: the hint wraps
+                // rather than sliding underneath it on a narrow phone.
                 boxSizing: "border-box",
                 maxWidth: "calc(100% - 310px)",
                 padding: "6px 9px",
@@ -421,30 +427,23 @@ export function GameRoom({
                 pointerEvents: "none",
               }}
             >
-              &gt; {controlling ? "D-PAD WALKS · A TALKS" : "TAP A TABLE OR CHARACTER · DRAG PANS · PINCH ZOOMS"}
+              &gt; {controlling ? "D-PAD WALKS · A TALKS" : "TAP A DESK OR AGENT · DRAG PANS · PINCH ZOOMS"}
             </div>
           )}
 
           <div style={{ position: "absolute", top: 10, right: 10, zIndex: 11, display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: "min(280px, calc(100vw - 20px))" }}>
-              <StudentSelector
-                players={allPlayers}
-                value={selectedPlayerIdx}
-                onChange={setSelectedPlayerIdx}
-                placeholder="Find someone..."
+              <AgentFinder
+                agents={agents}
+                value={selected?.type === "agent" ? selected.id : null}
+                onChange={(agentId) => select(agentId === null ? null : { type: "agent", id: agentId })}
               />
             </div>
           </div>
 
-          {/* Whose turn it is to present, flashed over the room — the scene
-              lights the desk and the wall, this makes sure nobody misses it. */}
-          <PresentationBanner presentation={net.presentation} teams={teams} />
-          {/* And whose place on the podium was just read out. */}
-          <WinnersBanner winners={net.winners} teams={teams} />
-
-          {(arcadeToast || (arcadeUnlock?.userId === me.id && arcadeUnlock.saveFailed)) && (
+          {(arcadeToast || (arcadeUnlock?.userId === visitor.id && arcadeUnlock.saveFailed)) && (
             <RoomToast>
-              {arcadeUnlock?.userId === me.id && arcadeUnlock.saveFailed
+              {arcadeUnlock?.userId === visitor.id && arcadeUnlock.saveFailed
                 ? "ARCADE OPEN FOR THIS VISIT · SAVE FAILED — RE-ENTER THE CODE TO RETRY"
                 : "★ AN ARCADE CABINET APPEARED"}
             </RoomToast>
